@@ -504,6 +504,46 @@ export function copy(from, to) {
   );
 }
 
+// Todo lo que cuelga de `path` para meterlo en un zip, con rutas relativas a su carpeta.
+export function collect(path) {
+  const node = getNode(path);
+  if (!node) throw new Error(`No existe: ${path}`);
+  const out = [];
+  const walk = (n, rel) => {
+    if (n.type === 'dir') {
+      out.push({ path: `${rel}/`, dir: true });
+      for (const [name, child] of Object.entries(n.children)) walk(child, `${rel}/${name}`);
+    } else if (n.remote) {
+      out.push({ path: rel, key: n.remote.key, size: n.remote.size });
+    } else {
+      out.push({ path: rel, data: n.content, size: n.content.length });
+    }
+  };
+  walk(node, basename(path));
+  return out;
+}
+
+function mkdirp(path) {
+  let cur = root;
+  for (const part of normalize(path).split('/').filter(Boolean)) {
+    if (!cur.children[part]) cur.children[part] = { type: 'dir', children: {}, mtime: now() };
+    else if (cur.children[part].type !== 'dir') throw new Error(`No es una carpeta: ${part}`);
+    cur = cur.children[part];
+  }
+  return cur;
+}
+
+// Crea en `dest` lo extraído de un zip (archivos ya subidos a B2), guardando una sola vez.
+export function importExtracted(dest, files, dirs) {
+  mkdirp(dest);
+  for (const d of dirs) mkdirp(join(dest, d));
+  for (const f of files) {
+    const parent = mkdirp(join(dest, dirname(`/${f.path}`)));
+    parent.children[basename(`/${f.path}`)] = { type: 'file', content: '', remote: { key: f.key, size: f.size, type: f.type }, mtime: now() };
+  }
+  persist();
+}
+
 // Devuelve un nombre libre en `dir` basado en `name` ("Nueva carpeta (2)").
 export function uniqueName(dir, name) {
   if (!exists(join(dir, name))) return name;

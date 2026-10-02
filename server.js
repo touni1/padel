@@ -11,7 +11,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, createReadStream, statSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Readable } from 'node:stream';
+import { Readable, Transform, PassThrough } from 'node:stream';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 if (existsSync(join(ROOT, '.env'))) process.loadEnvFile(join(ROOT, '.env'));
@@ -596,6 +596,258 @@ setInterval(() => {
 }, 3600_000).unref();
 
 // ---------------------------------------------------------------------------
+// ZIP: comprimir y extraer en el servidor (/api/zip, /api/unzip, /api/jobs)
+// ---------------------------------------------------------------------------
+//
+// Todo va de B2 a B2 sin pasar por el navegador ni por el disco: al comprimir se
+// leen los archivos de B2 y el zip se sube por partes mientras se genera; al
+// extraer, el zip se lee por rangos (nunca entero) y cada archivo se sube al
+// bucket. Son tareas en segundo plano: el navegador consulta /api/jobs?id=…
+
+let yazl = null;
+let yauzl = null;
+try {
+  yazl = (await import('yazl')).default;
+  yauzl = (await import('yauzl')).default;
+} catch (e) {
+  console.error(`ZIP desactivado (¿falta npm install?): ${e.message}`);
+}
+
+const ZIP_MAX_ENTRIES = 20_000;
+const UNZIP_MAX_BYTES = 20 * 1024 ** 3; // tope de lo descomprimido, contra "bombas zip"
+// Formatos que ya vienen comprimidos: se guardan tal cual (comprimirlos no reduce nada).
+const ALREADY_COMPRESSED = /\.(zip|rar|7z|gz|tgz|bz2|xz|zst|jpe?g|png|gif|webp|heic|avif|mp[34]|m4a|aac|mov|mkv|avi|webm|ogg|opus|flac|pdf|docx|xlsx|pptx|odt|ods|odp|apk|jar|iso)$/i;
+const MIME_BY_EXT = {
+  txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript',
+  json: 'application/json', xml: 'application/xml', pdf: 'application/pdf', zip: 'application/zip', png: 'image/png', jpg: 'image/jpeg',
+  jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+  m4a: 'audio/mp4', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+};
+const mimeOf = (name) => MIME_BY_EXT[name.split('.').pop().toLowerCase()] || 'application/octet-stream';
+
+const jobs = new Map(); // id -> { state: 'running' | 'done' | 'error', progress, result, error }
+
+function startJob(run) {
+  const id = crypto.randomUUID();
+  const job = { state: 'running', progress: 0 };
+  jobs.set(id, job);
+  run(job)
+    .then(
+      (result) => Object.assign(job, { state: 'done', progress: 1, result }),
+      (e) => {
+        console.error(`Tarea ${id}: ${e.message}`);
+        Object.assign(job, { state: 'error', error: e.message });
+      },
+    )
+    .finally(() => setTimeout(() => jobs.delete(id), 3600_000).unref());
+  return id;
+}
+
+const multipartXml = (etags) =>
+  `<CompleteMultipartUpload>${etags.map((e, i) => `<Part><PartNumber>${i + 1}</PartNumber><ETag>${e}</ETag></Part>`).join('')}</CompleteMultipartUpload>`;
+
+// Sube un stream de cualquier tamaño a B2 por partes y devuelve los bytes subidos.
+async function streamToB2(readable, key, type) {
+  const created = await b2Request('POST', key, { query: '?uploads', headers: { 'content-type': type } });
+  const b2Id = xmlTag(await created.text(), 'UploadId');
+  if (!b2Id) throw new Error('B2 no devolvió el identificador de la subida');
+  const etags = [];
+  let chunks = [];
+  let pending = 0;
+  let total = 0;
+  const flush = async () => {
+    const body = Buffer.concat(chunks);
+    chunks = [];
+    pending = 0;
+    const r = await b2Request('PUT', key, { body, query: `?partNumber=${etags.length + 1}&uploadId=${encodeRfc3986(b2Id)}` });
+    etags.push(r.headers.get('etag'));
+  };
+  try {
+    for await (const chunk of readable) {
+      chunks.push(chunk);
+      pending += chunk.length;
+      total += chunk.length;
+      if (pending >= PART_BYTES) await flush();
+    }
+    if (pending || !etags.length) await flush();
+    const done = await b2Request('POST', key, {
+      body: Buffer.from(multipartXml(etags)),
+      query: `?uploadId=${encodeRfc3986(b2Id)}`,
+      headers: { 'content-type': 'application/xml' },
+    });
+    const text = await done.text();
+    if (text.includes('<Error>')) throw new Error(`B2: ${xmlTag(text, 'Message') || 'no se pudo completar la subida'}`);
+    return total;
+  } catch (e) {
+    await b2Request('DELETE', key, { query: `?uploadId=${encodeRfc3986(b2Id)}` }).catch(() => {});
+    throw e;
+  }
+}
+
+// Rutas dentro del zip: sin "..", sin barras al principio y con "/" como separador.
+function zipPath(p) {
+  return String(p || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter((s) => s && s !== '.' && s !== '..')
+    .join('/')
+    .slice(0, 1000);
+}
+
+function decodeData(data) {
+  const m = data.match(/^data:[^,]*?(;base64)?,/);
+  if (!m) return Buffer.from(data, 'utf8');
+  const payload = data.slice(m[0].length);
+  return m[1] ? Buffer.from(payload, 'base64') : Buffer.from(decodeURIComponent(payload), 'utf8');
+}
+
+async function handleZip(req, res) {
+  let input;
+  try {
+    input = JSON.parse((await readBody(req, 64 * 1024 * 1024)).toString());
+  } catch (e) {
+    return sendJson(res, e.status || 400, { error: e.status ? e.message : 'Datos no válidos' });
+  }
+  const entries = Array.isArray(input.entries) ? input.entries : [];
+  if (!entries.length || entries.length > ZIP_MAX_ENTRIES) return sendJson(res, 400, { error: `Se pueden comprimir entre 1 y ${ZIP_MAX_ENTRIES} elementos` });
+  const clean = entries.map((e) => ({
+    path: zipPath(e.path),
+    dir: Boolean(e.dir),
+    key: e.key ? checkKey(e.key) : null,
+    data: typeof e.data === 'string' ? e.data : '',
+    size: Math.max(0, Number(e.size) || 0),
+  }));
+  if (clean.some((e) => !e.path)) return sendJson(res, 400, { error: 'Hay un nombre de archivo no válido' });
+  const name = String(input.name || 'archivo.zip');
+  const key = newKey(name.toLowerCase().endsWith('.zip') ? name : `${name}.zip`);
+  const total = clean.reduce((a, e) => a + (e.key ? e.size : 0), 0) || 1;
+
+  const id = startJob(async (job) => {
+    const zip = new yazl.ZipFile();
+    let read = 0;
+    for (const e of clean) {
+      const opts = { compress: !ALREADY_COMPRESSED.test(e.path) };
+      if (e.dir) {
+        zip.addEmptyDirectory(e.path);
+      } else if (e.key) {
+        // Lazy: cada archivo se pide a B2 recién cuando le toca, de a uno.
+        zip.addReadStreamLazy(e.path, opts, (cb) => {
+          b2Request('GET', e.key).then((r) => {
+            const counter = new Transform({
+              transform(chunk, _, done) {
+                read += chunk.length;
+                job.progress = Math.min(0.99, read / total);
+                done(null, chunk);
+              },
+            });
+            const src = Readable.fromWeb(r.body);
+            src.on('error', (err) => counter.destroy(err));
+            cb(null, src.pipe(counter));
+          }, cb);
+        });
+      } else {
+        zip.addBuffer(decodeData(e.data), e.path, opts);
+      }
+    }
+    zip.on('error', (err) => zip.outputStream.destroy(err));
+    zip.end();
+    const size = await streamToB2(zip.outputStream, key, 'application/zip');
+    return { key, size, type: 'application/zip' };
+  });
+  return sendJson(res, 202, { job: id });
+}
+
+// Lector de yauzl que pide a B2 solo el rango de bytes que necesita.
+function b2RangeReader(key) {
+  const reader = new yauzl.RandomAccessReader();
+  reader._readStreamForRange = (start, end) => {
+    const out = new PassThrough();
+    b2Request('GET', key, { headers: { range: `bytes=${start}-${end - 1}` } }).then(
+      (r) => {
+        const src = Readable.fromWeb(r.body);
+        src.on('error', (err) => out.destroy(err));
+        src.pipe(out);
+      },
+      (err) => out.destroy(err),
+    );
+    return out;
+  };
+  return reader;
+}
+
+async function handleUnzip(req, res) {
+  let input;
+  try {
+    input = JSON.parse((await readBody(req, 8192)).toString());
+  } catch {
+    return sendJson(res, 400, { error: 'Datos no válidos' });
+  }
+  const key = checkKey(input.key);
+  const head = await b2Request('HEAD', key);
+  const zipSize = Number(head.headers.get('content-length'));
+
+  const id = startJob(async (job) => {
+    const zipfile = await yauzl.fromRandomAccessReaderPromise(b2RangeReader(key), zipSize, { validateEntrySizes: true, strictFileNames: false });
+    if (zipfile.entryCount > ZIP_MAX_ENTRIES) throw new Error(`El zip tiene más de ${ZIP_MAX_ENTRIES} elementos`);
+    const files = [];
+    const dirs = new Set();
+    const uploaded = [];
+    let unpacked = 0;
+    let seen = 0;
+    try {
+      for await (const entry of zipfile.eachEntry()) {
+        seen++;
+        job.progress = Math.min(0.99, seen / Math.max(1, zipfile.entryCount));
+        const path = zipPath(entry.fileName);
+        if (!path || path.startsWith('__MACOSX/') || path.endsWith('.DS_Store')) continue;
+        if (entry.fileName.endsWith('/')) {
+          dirs.add(path);
+          continue;
+        }
+        if (entry.isEncrypted()) throw new Error('El zip tiene contraseña: no se puede extraer aquí');
+        unpacked += entry.uncompressedSize;
+        if (unpacked > UNZIP_MAX_BYTES) throw new Error('El contenido descomprimido supera 20 GB');
+        const name = path.split('/').pop();
+        const type = mimeOf(name);
+        const fileKey = newKey(name);
+        const stream = await zipfile.openReadStreamPromise(entry);
+        if (entry.uncompressedSize <= PART_BYTES) {
+          const chunks = [];
+          for await (const c of stream) chunks.push(c);
+          await b2Request('PUT', fileKey, { body: Buffer.concat(chunks), headers: { 'content-type': type } });
+        } else {
+          await streamToB2(stream, fileKey, type);
+        }
+        uploaded.push(fileKey);
+        files.push({ path, key: fileKey, size: entry.uncompressedSize, type });
+      }
+    } catch (e) {
+      // Si algo falla a medias no quedan archivos huérfanos en el bucket.
+      await Promise.all(uploaded.map((k) => b2Request('DELETE', k).catch(() => {})));
+      throw e;
+    } finally {
+      zipfile.close();
+    }
+    return { files, dirs: [...dirs] };
+  });
+  return sendJson(res, 202, { job: id });
+}
+
+async function handleZipApi(req, res, url) {
+  if (url.pathname === '/api/jobs' && req.method === 'GET') {
+    const job = jobs.get(url.searchParams.get('id'));
+    return job ? sendJson(res, 200, job) : sendJson(res, 404, { error: 'La tarea no existe o caducó' });
+  }
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Método no permitido' });
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  if (!yazl || !yauzl) return sendJson(res, 503, { error: 'ZIP no disponible en el servidor (falta npm install)' });
+  if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
+  if (url.pathname === '/api/zip') return handleZip(req, res);
+  if (url.pathname === '/api/unzip') return handleUnzip(req, res);
+  return sendJson(res, 404, { error: 'Ruta no encontrada' });
+}
+
+// ---------------------------------------------------------------------------
 // Enlaces de descarga para compartir (/d/<token>)
 // ---------------------------------------------------------------------------
 //
@@ -857,6 +1109,7 @@ async function handleApi(req, res, url) {
   if (route === '/api/b2-config') return handleB2Config(req, res);
   if (route === '/api/tree') return handleTree(req, res);
   if (route === '/api/shares') return handleSharesApi(req, res, url);
+  if (route === '/api/zip' || route === '/api/unzip' || route === '/api/jobs') return handleZipApi(req, res, url);
   if (route.startsWith('/api/uploads')) {
     if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
     return handleUploads(req, res, url);

@@ -34,6 +34,58 @@ export async function deleteEntry(path) {
   }
 }
 
+// Espera a que termine una tarea del servidor (zip/unzip) mostrando el progreso.
+async function waitJob(id, note, label) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const res = await fetch(`api/jobs?id=${encodeURIComponent(id)}`);
+    const job = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(job.error || `Error ${res.status}`);
+    if (job.state === 'done') return job.result;
+    if (job.state === 'error') throw new Error(job.error);
+    note.update(`${label}… ${Math.floor(job.progress * 100)}%`);
+  }
+}
+
+async function startJob(endpoint, body) {
+  const res = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+  return data.job;
+}
+
+export async function compressEntry(path) {
+  const dir = fs.dirname(path);
+  const base = fs.isDir(path) ? fs.basename(path) : fs.basename(path).replace(/\.[^.]+$/, '') || fs.basename(path);
+  const name = fs.uniqueName(dir, `${base}.zip`);
+  const note = toast(`Comprimiendo "${fs.basename(path)}"…`);
+  try {
+    const job = await startJob('api/zip', { name, entries: fs.collect(path) });
+    const result = await waitJob(job, note, `Comprimiendo "${fs.basename(path)}"`);
+    fs.writeRemote(fs.join(dir, fs.uniqueName(dir, name)), result);
+    note.done(`Creado "${name}"`);
+  } catch (e) {
+    note.done('No se pudo comprimir', true);
+    await alert('Error al comprimir', e.message);
+  }
+}
+
+export async function extractEntry(path) {
+  const remote = fs.getRemote(path);
+  const dir = fs.dirname(path);
+  const dest = fs.join(dir, fs.uniqueName(dir, fs.basename(path).replace(/\.zip$/i, '') || 'Extraído'));
+  const note = toast(`Extrayendo "${fs.basename(path)}"…`);
+  try {
+    const job = await startJob('api/unzip', { key: remote.key });
+    const { files, dirs } = await waitJob(job, note, `Extrayendo "${fs.basename(path)}"`);
+    fs.importExtracted(dest, files, dirs);
+    note.done(`Extraído en "${fs.basename(dest)}" (${files.length} archivo${files.length === 1 ? '' : 's'})`);
+  } catch (e) {
+    note.done('No se pudo extraer', true);
+    await alert('Error al extraer', e.message);
+  }
+}
+
 export function duplicateEntry(path) {
   const dir = fs.dirname(path);
   return reportError(() => fs.copy(path, fs.join(dir, fs.uniqueName(dir, fs.basename(path)))));
@@ -101,6 +153,10 @@ export function entryMenu(e, path) {
   ];
   if (!fs.isDir(path)) items.push({ label: 'Descargar', action: () => download(path) });
   if (!fs.isDir(path) && !path.startsWith(fs.TRASH + '/') && storage.enabled()) items.push({ label: 'Compartir enlace…', action: () => shareFile(path) });
+  if (!path.startsWith(fs.TRASH + '/') && storage.enabled()) {
+    items.push('sep', { label: 'Comprimir en ZIP', action: () => compressEntry(path) });
+    if (fs.extname(path) === 'zip' && fs.getRemote(path)) items.push({ label: 'Extraer aquí', action: () => extractEntry(path) });
+  }
   items.push('sep', { label: path.startsWith(fs.TRASH + '/') ? 'Eliminar para siempre' : 'Eliminar', action: () => deleteEntry(path) });
   contextMenu(e.clientX, e.clientY, items);
 }
