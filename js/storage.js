@@ -15,10 +15,24 @@ export async function init() {
 }
 
 export const enabled = () => status.b2;
+export const authEnabled = () => Boolean(status.auth);
+
+export function logout() {
+  const form = document.createElement('form');
+  form.method = 'post';
+  form.action = 'logout';
+  document.body.appendChild(form);
+  form.submit();
+}
 export const bucket = () => status.bucket;
 
 async function check(res) {
   if (res.ok) return res.json();
+  if (res.status === 401) {
+    // La sesión ha caducado: vuelve a la pantalla de inicio de sesión.
+    location.href = 'login';
+    throw new Error('Sesión caducada');
+  }
   const data = await res.json().catch(() => ({}));
   throw new Error(data.error || `Error ${res.status} del servidor`);
 }

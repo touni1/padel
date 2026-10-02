@@ -405,3 +405,4 @@ input, textarea, select {
   font-size: 13px;
 }
 .toast.error { background: #b4232a; }
+.start-logout { margin-top: 6px; border-top: 1px solid var(--border); border-radius: 0 0 8px 8px; }

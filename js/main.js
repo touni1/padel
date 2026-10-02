@@ -47,6 +47,13 @@ function renderStartMenu() {
     };
     appsEl.appendChild(item);
   }
+  if (storage.authEnabled()) {
+    const logout = document.createElement('div');
+    logout.className = 'start-item start-logout';
+    logout.innerHTML = '<span class="glyph">🔒</span><span>Cerrar sesión</span>';
+    logout.onclick = storage.logout;
+    appsEl.appendChild(logout);
+  }
   document.getElementById('start-btn').onclick = (e) => {
     e.stopPropagation();
     menu.hidden = !menu.hidden;
@@ -98,9 +105,9 @@ function wireDesktop() {
 }
 
 applySettings();
-storage.init();
 renderDesktop();
 renderStartMenu();
+storage.init().then(renderStartMenu);
 startClock();
 wireDesktop();
 fs.onChange(renderDesktop);

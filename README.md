@@ -29,10 +29,16 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 Necesitas Node.js 20.12 o superior (no hay dependencias que instalar).
 
 ```bash
-cp .env.example .env   # y rellénalo con tus datos de B2
+cp .env.example .env   # y rellénalo con tu contraseña y tus datos de B2
 npm start
 # abre http://localhost:8000
 ```
+
+### Contraseña
+
+Define `MIPUTER_PASSWORD` en `.env` y MiPuter pedirá esa contraseña antes de mostrar nada (la web, los archivos y la API quedan protegidos). La sesión dura 30 días (`SESSION_DAYS`), y se cierra desde **Inicio → Cerrar sesión**. Al cambiar la contraseña se cierran todas las sesiones abiertas. Tras 5 intentos fallidos seguidos, esa IP queda bloqueada 15 minutos.
+
+Si lo publicas en internet, sírvelo siempre con **HTTPS**, porque si no la contraseña viaja sin cifrar. Detrás de un proxy (nginx, Caddy…) añade `TRUST_PROXY=true` para que el límite de intentos use la IP real.
 
 ### Configurar Backblaze B2
 
@@ -52,7 +58,7 @@ npm start
 
 **Cómo funciona:** el navegador nunca ve tus claves. Las subidas van a `server.js`, que las firma (AWS Signature V4, la API compatible con S3 de B2) y las guarda en el bucket bajo `miputer/<id>-<nombre>`. Al abrir un archivo, el servidor lo lee de B2 y se lo pasa al navegador, así que no hace falta configurar CORS en el bucket. El árbol de carpetas sigue guardándose en el navegador (`localStorage`) y apunta a esos objetos.
 
-> ⚠️ El servidor no tiene usuarios ni contraseña: cualquiera que pueda abrir su dirección puede leer y borrar los archivos subidos. Úsalo en local o detrás de un acceso protegido si lo publicas en internet.
+> ⚠️ Si no defines `MIPUTER_PASSWORD`, cualquiera que pueda abrir la dirección del servidor puede leer y borrar los archivos subidos.
 
 ### Sin B2
 
@@ -61,7 +67,7 @@ Si `.env` no está configurado (o sirves la carpeta con un servidor estático, c
 ## Estructura
 
 ```
-server.js         servidor Node: web estática + API de archivos en B2
+server.js         servidor Node: inicio de sesión, web estática y API de archivos en B2
 .env.example      plantilla de configuración de B2
 index.html
 css/style.css
