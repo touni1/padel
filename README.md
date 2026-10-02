@@ -14,6 +14,8 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 - **Enlaces para compartir**: clic derecho en un archivo → *Compartir enlace…* crea `https://…/d/<token>` para que cualquiera lo descargue sin entrar, con caducidad (1 h a 30 días) y límite de descargas opcional. Se gestionan en Inicio → 🔗 Enlaces compartidos y se guardan en `data/enlaces.json`.
 - **ZIP**: clic derecho → *Comprimir en ZIP* (archivos o carpetas) y, en un `.zip`, *Extraer aquí*. Lo hace el servidor de B2 a B2, como tarea en segundo plano con progreso: comprime al vuelo subiendo por partes y extrae leyendo el zip por rangos, sin bajarlo entero (máx. 20 000 elementos y 20 GB descomprimidos; zip con contraseña no).
 - **Sin buscadores ni robots**: `robots.txt` lo prohíbe todo, todas las respuestas llevan `X-Robots-Tag: noindex` y los bots conocidos (buscadores, IA, SEO) reciben 403.
+- **Carpetas enteras**: arrastrarlas desde el ordenador o *Subir carpeta…* las sube con sus subcarpetas (de a 3 archivos a la vez, con un solo aviso de progreso). En Ajustes se ve el **espacio usado** por carpeta.
+- Las lecturas de B2 van en tramos de 32 MB pedidos por adelantado, nunca con una conexión larga (B2 corta las que quedan frenadas): así funcionan las descargas lentas, reanudar (`Range`), adelantar vídeos, comprimir y extraer.
 - Subida de archivos desde tu ordenador (botón ⤒ o arrastrándolos al escritorio o al explorador) y descarga.
 - **Archivos subidos guardados en Backblaze B2** (llevan una nube ☁ en el icono). Se pueden abrir, editar, duplicar, descargar y borrar; los cambios se aplican también en B2.
 
@@ -29,6 +31,7 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 | 🌐 Navegador | Navega URLs en un iframe o muestra archivos `.html` del sistema virtual |
 | 🖼️ Visor de imágenes | Abre imágenes subidas |
 | 📕 Editor de PDF | Texto, resaltar, tapar, dibujar y firmar; rellenar formularios; rotar, mover y borrar páginas; unir PDFs. Guarda sobre el archivo o como copia (pdf.js + pdf-lib, en `js/vendor/`) |
+| 🔍 Buscar | Busca archivos y carpetas por nombre en todo MiPuter, sin distinguir mayúsculas ni acentos |
 | 🗑️ Papelera | Lo eliminado va aquí: restaurar a su sitio, eliminar para siempre o vaciar. Se borra solo a los 30 días |
 | ⚙️ Ajustes | Fondos de escritorio, tema claro/oscuro y restablecer archivos |
 

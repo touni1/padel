@@ -533,6 +533,48 @@ function mkdirp(path) {
   return cur;
 }
 
+// Crea `path` y las carpetas intermedias que falten (como mkdir -p).
+export function ensureDir(path) {
+  if (isDir(path)) return;
+  mkdirp(path);
+  persist();
+}
+
+// Espacio que ocupa todo, por carpeta de primer nivel, y la papelera.
+export function usage() {
+  const sizeOfTree = (n) => (n.type === 'dir' ? Object.values(n.children).reduce((a, c) => a + sizeOfTree(c), 0) : sizeOf(n));
+  const count = (n) => (n.type === 'dir' ? Object.values(n.children).reduce((a, c) => a + count(c), 0) : 1);
+  const folders = Object.entries(root.children)
+    .filter(([name]) => name !== 'Papelera')
+    .map(([name, n]) => ({ name, bytes: sizeOfTree(n), files: count(n) }))
+    .sort((a, b) => b.bytes - a.bytes);
+  const trashNode = root.children.Papelera;
+  const trash = trashNode ? { bytes: sizeOfTree(trashNode), files: count(trashNode) } : { bytes: 0, files: 0 };
+  return { folders, trash, bytes: folders.reduce((a, f) => a + f.bytes, 0) + trash.bytes, files: folders.reduce((a, f) => a + f.files, 0) + trash.files };
+}
+
+// Busca por nombre (sin distinguir mayúsculas ni acentos) fuera de la papelera.
+export function search(query, limit = 300) {
+  const plain = (s) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const q = plain(query.trim());
+  const out = [];
+  if (!q) return out;
+  const walk = (n, path) => {
+    for (const [name, child] of Object.entries(n.children)) {
+      const p = join(path, name);
+      if (p === TRASH) continue;
+      if (plain(name).includes(q)) {
+        out.push({ name, path: p, type: child.type, mtime: child.mtime, size: child.type === 'file' ? sizeOf(child) : Object.keys(child.children).length, remote: child.remote || null });
+        if (out.length >= limit) return;
+      }
+      if (child.type === 'dir') walk(child, p);
+      if (out.length >= limit) return;
+    }
+  };
+  walk(root, '/');
+  return out;
+}
+
 // Crea en `dest` lo extraído de un zip (archivos ya subidos a B2), guardando una sola vez.
 export function importExtracted(dest, files, dirs) {
   mkdirp(dest);

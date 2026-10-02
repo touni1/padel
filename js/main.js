@@ -1,7 +1,7 @@
 import * as fs from './fs.js';
 import { register, list, launch } from './registry.js';
 import * as storage from './storage.js';
-import { renderIcons, folderMenu, moveInto, importFiles } from './fileActions.js';
+import { renderIcons, folderMenu, moveInto, importDrop } from './fileActions.js';
 import { hideContextMenu, reportError, escapeHtml, toast } from './ui.js';
 import { applySettings } from './apps/settings.js';
 
@@ -16,10 +16,11 @@ import settings from './apps/settings.js';
 import trash from './apps/trash.js';
 import shares from './apps/shares.js';
 import pdf from './apps/pdf.js';
+import search from './apps/search.js';
 
 const DESKTOP_DIR = '/Escritorio';
 
-[files, editor, terminal, claude, calculator, browser, viewer, pdf, settings, shares, trash].forEach(register);
+[files, search, editor, terminal, claude, calculator, browser, viewer, pdf, settings, shares, trash].forEach(register);
 
 function appIcon(app) {
   const el = document.createElement('div');
@@ -100,7 +101,7 @@ function wireDesktop() {
     e.preventDefault();
     if (e.dataTransfer.files.length) {
       // Archivos arrastrados desde el ordenador real.
-      importFiles(DESKTOP_DIR, [...e.dataTransfer.files]);
+      importDrop(DESKTOP_DIR, e.dataTransfer);
     } else {
       moveInto(e, DESKTOP_DIR);
     }

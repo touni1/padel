@@ -1,6 +1,6 @@
 import * as fs from '../fs.js';
 import { createWindow } from '../wm.js';
-import { confirm, toast } from '../ui.js';
+import { confirm, toast, formatSize, escapeHtml } from '../ui.js';
 import * as storage from '../storage.js';
 
 const SETTINGS_KEY = 'miputer.settings.v1';
@@ -56,6 +56,10 @@ export default {
             <option value="dark">Oscuro</option>
           </select>
         </section>
+        <section>
+          <h3>Espacio usado</h3>
+          <div class="usage"></div>
+        </section>
         <section class="b2-config" hidden>
           <h3>Backblaze B2 (dónde se guardan las subidas)</h3>
           <p class="b2-state muted"></p>
@@ -94,10 +98,27 @@ export default {
     win.body.querySelector('.reset').onclick = async () => {
       if (await confirm('Restablecer', 'Se borrarán todos tus archivos y se restaurarán los de ejemplo. ¿Continuar?')) fs.reset();
     };
+    renderUsage(win.body.querySelector('.usage'));
     setupB2(win.body.querySelector('.b2-config'));
     return win;
   },
 };
+
+function renderUsage(el) {
+  const u = fs.usage();
+  const max = Math.max(1, ...u.folders.map((f) => f.bytes), u.trash.bytes);
+  const row = (name, bytes, files) => `
+    <div class="usage-row">
+      <span class="usage-name">${escapeHtml(name)}</span>
+      <span class="usage-bar"><span style="width:${Math.max(bytes ? 2 : 0, (bytes / max) * 100)}%"></span></span>
+      <span class="usage-size">${formatSize(bytes)} · ${files} archivo${files === 1 ? '' : 's'}</span>
+    </div>`;
+  el.innerHTML = `
+    <p class="muted"><b>${formatSize(u.bytes)}</b> en ${u.files} archivo${u.files === 1 ? '' : 's'}</p>
+    ${u.folders.map((f) => row(f.name, f.bytes, f.files)).join('')}
+    ${row('🗑️ Papelera', u.trash.bytes, u.trash.files)}
+    <p class="muted">No incluye las versiones antiguas que B2 guarda según la regla de ciclo de vida del bucket.</p>`;
+}
 
 // Solo con el servidor de MiPuter (sin él, /api/b2-config no existe y la sección queda oculta).
 async function setupB2(section) {

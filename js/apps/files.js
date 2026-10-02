@@ -1,7 +1,7 @@
 import * as fs from '../fs.js';
 import { createWindow } from '../wm.js';
 import * as storage from '../storage.js';
-import { renderIcons, folderMenu, moveInto, newFolder, newFile, uploadInto, importFiles } from '../fileActions.js';
+import { renderIcons, folderMenu, moveInto, newFolder, newFile, uploadInto, uploadFolderInto, importDrop } from '../fileActions.js';
 import { openPath } from '../registry.js';
 
 export default {
@@ -19,6 +19,7 @@ export default {
           <button data-act="folder" title="Nueva carpeta">📁+</button>
           <button data-act="file" title="Nuevo archivo">📄+</button>
           <button data-act="upload" title="Subir archivos">⤒</button>
+          <button data-act="uploaddir" title="Subir una carpeta entera">📁⤒</button>
         </div>
         <div class="files-grid grow"></div>
         <div class="statusbar"></div>
@@ -60,13 +61,14 @@ export default {
       if (act === 'folder') newFolder(cwd);
       if (act === 'file') newFile(cwd);
       if (act === 'upload') uploadInto(cwd);
+      if (act === 'uploaddir') uploadFolderInto(cwd);
     };
     pathInput.onkeydown = (e) => e.key === 'Enter' && navigate(pathInput.value);
     grid.oncontextmenu = (e) => folderMenu(e, cwd);
     grid.ondragover = (e) => e.preventDefault();
     grid.ondrop = (e) => {
       e.preventDefault();
-      if (e.dataTransfer.files.length) importFiles(cwd, [...e.dataTransfer.files]);
+      if (e.dataTransfer.files.length) importDrop(cwd, e.dataTransfer);
       else moveInto(e, cwd);
     };
 

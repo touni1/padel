@@ -485,3 +485,23 @@ button.btn.primary { background: var(--accent); border-color: var(--accent); col
 
 /* El atributo hidden siempre gana a los display de arriba */
 [hidden] { display: none !important; }
+
+/* Buscar */
+.search-input { flex: 1; font-size: 14px; }
+.search-results { overflow: auto; padding: 6px; display: grid; gap: 2px; align-content: start; }
+.search-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; cursor: default; }
+.search-row:hover { background: var(--surface-2); }
+.search-row .glyph { font-size: 22px; }
+.search-meta { flex: 1; min-width: 0; display: grid; }
+.search-meta b, .search-meta small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-meta b { font-weight: 600; font-size: 13px; }
+.search-meta small, .search-size { color: var(--text-muted); font-size: 12px; }
+
+/* Espacio usado (Ajustes) */
+.usage { display: grid; gap: 6px; }
+.usage .muted { margin: 0; color: var(--text-muted); font-size: 13px; }
+.usage-row { display: grid; grid-template-columns: 110px 1fr auto; align-items: center; gap: 8px; font-size: 13px; }
+.usage-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-bar { height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
+.usage-bar span { display: block; height: 100%; background: var(--accent); }
+.usage-size { color: var(--text-muted); font-size: 12px; white-space: nowrap; }

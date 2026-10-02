@@ -11,7 +11,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, createReadStream, statSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Readable, Transform, PassThrough } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 if (existsSync(join(ROOT, '.env'))) process.loadEnvFile(join(ROOT, '.env'));
@@ -304,10 +304,99 @@ async function b2Request(method, key, { body, headers = {}, query = '' } = {}, c
   if (!res.ok && !(method === 'DELETE' && res.status === 404)) {
     const text = await res.text().catch(() => '');
     const xml = (t) => t.replace(/&(apos|quot|lt|gt|amp);/g, (_, e) => ({ apos: "'", quot: '"', lt: '<', gt: '>', amp: '&' })[e]);
-    const msg = xml(text.match(/<Message>([^<]*)<\/Message>/)?.[1] || '') || text.slice(0, 200) || res.statusText;
+    let msg = xml(text.match(/<Message>([^<]*)<\/Message>/)?.[1] || '') || text.slice(0, 200) || res.statusText;
+    // HEAD no trae cuerpo: un 403 de lectura casi siempre es el tope diario de descargas de la cuenta.
+    if (/cap exceeded/i.test(msg) || (res.status === 403 && method === 'HEAD')) {
+      msg = 'se alcanzó el tope diario de descargas de Backblaze B2 (se renueva a las 00:00 UTC, o súbelo en B2 → Caps & Alerts)';
+    }
     throw Object.assign(new Error(`B2 ${res.status}: ${msg}`), { status: res.status === 404 ? 404 : 502 });
   }
   return res;
+}
+
+// Lee [start, end) de un objeto de B2 en tramos de RANGE_BYTES, pidiendo cada
+// tramo solo cuando hace falta. Así ninguna conexión con B2 queda abierta y
+// frenada mucho rato (B2 la corta) aunque quien lee vaya despacio: una descarga
+// lenta, o comprimir y extraer, que esperan a que suba lo anterior.
+const RANGE_BYTES = 32 * 1024 * 1024; // cada tramo es una lectura (transacción clase B) en B2
+
+function b2RangeStream(key, start, end) {
+  let next = start; // siguiente byte a pedir
+  const ahead = []; // tramos ya pedidos, en orden (hasta 2 por delante del que se envía)
+  const fetchRange = async (from, to) => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const r = await b2Request('GET', key, { headers: { range: `bytes=${from}-${to - 1}` } });
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (buf.length !== to - from) throw new Error(`B2 devolvió ${buf.length} bytes en vez de ${to - from}`);
+        return buf;
+      } catch (e) {
+        if (attempt >= 3 || e.status === 404) throw e;
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
+    }
+  };
+  const fill = () => {
+    while (ahead.length < 3 && next < end) {
+      const to = Math.min(end, next + RANGE_BYTES);
+      const p = fetchRange(next, to);
+      p.catch(() => {}); // el error se recoge al esperarlo, en orden
+      ahead.push(p);
+      next = to;
+    }
+  };
+  let busy = false;
+  return new Readable({
+    highWaterMark: 1024 * 1024,
+    async read() {
+      if (busy) return;
+      busy = true;
+      try {
+        fill();
+        if (!ahead.length) return this.push(null);
+        const buf = await ahead.shift();
+        fill();
+        this.push(buf);
+      } catch (e) {
+        this.destroy(e);
+      } finally {
+        busy = false;
+      }
+    },
+  });
+}
+
+// Envía un archivo de B2 al navegador, con soporte de Range (adelantar vídeos,
+// reanudar descargas). `extra` añade cabeceras (descarga, caché…).
+async function sendB2File(req, res, key, extra = {}) {
+  const head = await b2Request('HEAD', key);
+  const size = Number(head.headers.get('content-length')) || 0;
+  const headers = {
+    'content-type': head.headers.get('content-type') || 'application/octet-stream',
+    'accept-ranges': 'bytes',
+    ...extra,
+  };
+  let [start, end] = [0, size];
+  const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  if (range && size) {
+    if (range[1]) [start, end] = [Number(range[1]), range[2] ? Math.min(size, Number(range[2]) + 1) : size];
+    else [start, end] = [Math.max(0, size - Number(range[2])), size];
+    if (start >= end || start >= size) {
+      res.writeHead(416, { 'content-range': `bytes */${size}` });
+      return res.end();
+    }
+    headers['content-range'] = `bytes ${start}-${end - 1}/${size}`;
+  }
+  headers['content-length'] = end - start;
+  res.writeHead(headers['content-range'] ? 206 : 200, headers);
+  if (req.method === 'HEAD' || end === start) return res.end();
+  const stream = b2RangeStream(key, start, end);
+  stream.on('error', (e) => {
+    console.error(`Descarga cortada (${key}): ${e.message}`);
+    res.destroy(e);
+  });
+  res.on('close', () => stream.destroy());
+  stream.pipe(res);
 }
 
 // ---------------------------------------------------------------------------
@@ -646,30 +735,42 @@ function startJob(run) {
 const multipartXml = (etags) =>
   `<CompleteMultipartUpload>${etags.map((e, i) => `<Part><PartNumber>${i + 1}</PartNumber><ETag>${e}</ETag></Part>`).join('')}</CompleteMultipartUpload>`;
 
-// Sube un stream de cualquier tamaño a B2 por partes y devuelve los bytes subidos.
+// Sube un stream de cualquier tamaño a B2 por partes (hasta 3 a la vez) y devuelve
+// los bytes subidos. El stream se frena mientras haya 3 partes en camino.
 async function streamToB2(readable, key, type) {
   const created = await b2Request('POST', key, { query: '?uploads', headers: { 'content-type': type } });
   const b2Id = xmlTag(await created.text(), 'UploadId');
   if (!b2Id) throw new Error('B2 no devolvió el identificador de la subida');
   const etags = [];
+  const parts = [];
+  const inflight = new Set();
   let chunks = [];
   let pending = 0;
   let total = 0;
-  const flush = async () => {
+  const flush = () => {
     const body = Buffer.concat(chunks);
     chunks = [];
     pending = 0;
-    const r = await b2Request('PUT', key, { body, query: `?partNumber=${etags.length + 1}&uploadId=${encodeRfc3986(b2Id)}` });
-    etags.push(r.headers.get('etag'));
+    const n = parts.length + 1;
+    const p = b2Request('PUT', key, { body, query: `?partNumber=${n}&uploadId=${encodeRfc3986(b2Id)}` }).then((r) => {
+      etags[n - 1] = r.headers.get('etag');
+    });
+    parts.push(p);
+    inflight.add(p);
+    p.catch(() => {}).finally(() => inflight.delete(p));
   };
   try {
     for await (const chunk of readable) {
       chunks.push(chunk);
       pending += chunk.length;
       total += chunk.length;
-      if (pending >= PART_BYTES) await flush();
+      if (pending >= PART_BYTES) {
+        flush();
+        while (inflight.size >= 3) await Promise.race(inflight);
+      }
     }
-    if (pending || !etags.length) await flush();
+    if (pending || !parts.length) flush();
+    await Promise.all(parts);
     const done = await b2Request('POST', key, {
       body: Buffer.from(multipartXml(etags)),
       query: `?uploadId=${encodeRfc3986(b2Id)}`,
@@ -679,6 +780,7 @@ async function streamToB2(readable, key, type) {
     if (text.includes('<Error>')) throw new Error(`B2: ${xmlTag(text, 'Message') || 'no se pudo completar la subida'}`);
     return total;
   } catch (e) {
+    await Promise.allSettled(parts);
     await b2Request('DELETE', key, { query: `?uploadId=${encodeRfc3986(b2Id)}` }).catch(() => {});
     throw e;
   }
@@ -732,7 +834,7 @@ async function handleZip(req, res) {
       } else if (e.key) {
         // Lazy: cada archivo se pide a B2 recién cuando le toca, de a uno.
         zip.addReadStreamLazy(e.path, opts, (cb) => {
-          b2Request('GET', e.key).then((r) => {
+          b2Request('HEAD', e.key).then((head) => {
             const counter = new Transform({
               transform(chunk, _, done) {
                 read += chunk.length;
@@ -740,7 +842,7 @@ async function handleZip(req, res) {
                 done(null, chunk);
               },
             });
-            const src = Readable.fromWeb(r.body);
+            const src = b2RangeStream(e.key, 0, Number(head.headers.get('content-length')) || 0);
             src.on('error', (err) => counter.destroy(err));
             cb(null, src.pipe(counter));
           }, cb);
@@ -757,21 +859,10 @@ async function handleZip(req, res) {
   return sendJson(res, 202, { job: id });
 }
 
-// Lector de yauzl que pide a B2 solo el rango de bytes que necesita.
+// Lector de yauzl que pide a B2 solo los bytes que necesita, por tramos.
 function b2RangeReader(key) {
   const reader = new yauzl.RandomAccessReader();
-  reader._readStreamForRange = (start, end) => {
-    const out = new PassThrough();
-    b2Request('GET', key, { headers: { range: `bytes=${start}-${end - 1}` } }).then(
-      (r) => {
-        const src = Readable.fromWeb(r.body);
-        src.on('error', (err) => out.destroy(err));
-        src.pipe(out);
-      },
-      (err) => out.destroy(err),
-    );
-    return out;
-  };
+  reader._readStreamForRange = (start, end) => b2RangeStream(key, start, end);
   return reader;
 }
 
@@ -968,25 +1059,24 @@ async function handleShareDownload(req, res, url) {
     return sharePage(res, 404, '<div class="icon">⌛</div><h1>Este enlace no existe o ya caducó</h1><p>Pídele a quien te lo mandó uno nuevo.</p>');
   }
   if (action === 'descargar') {
-    let r;
     try {
-      r = await b2Request('GET', sh.key);
+      await b2Request('HEAD', sh.key);
     } catch (e) {
       if (e.status === 404) return sharePage(res, 404, '<div class="icon">🗑️</div><h1>El archivo ya no está disponible</h1>');
       throw e;
     }
-    sh.downloads++;
-    saveShares();
-    const headers = {
+    // Solo cuenta la descarga cuando empieza desde el principio (no al reanudar).
+    if (!/^bytes=[1-9]/.test(req.headers.range || '')) {
+      sh.downloads++;
+      saveShares();
+    }
+    return sendB2File(req, res, sh.key, {
       'content-type': 'application/octet-stream',
       'content-disposition': `attachment; filename*=UTF-8''${encodeRfc3986(sh.name)}`,
       'x-content-type-options': 'nosniff',
       'cache-control': 'no-store',
       'referrer-policy': 'no-referrer',
-    };
-    if (r.headers.get('content-length')) headers['content-length'] = r.headers.get('content-length');
-    res.writeHead(200, headers);
-    return Readable.fromWeb(r.body).pipe(res);
+    });
   }
   if (action) return sharePage(res, 404, '<h1>No encontrado</h1>');
   const left = sh.maxDownloads ? ` · quedan ${sh.maxDownloads - sh.downloads} descargas` : '';
@@ -1137,17 +1227,11 @@ async function handleApi(req, res, url) {
     const key = checkKey(url.searchParams.get('key'));
 
     // Leer: GET /api/files?key=...[&download=nombre]
-    if (method === 'GET') {
-      const r = await b2Request('GET', key);
-      const headers = {
-        'content-type': r.headers.get('content-type') || 'application/octet-stream',
-        'cache-control': 'private, max-age=3600',
-      };
-      if (r.headers.get('content-length')) headers['content-length'] = r.headers.get('content-length');
+    if (method === 'GET' || method === 'HEAD') {
+      const extra = { 'cache-control': 'private, max-age=3600' };
       const download = url.searchParams.get('download');
-      if (download) headers['content-disposition'] = `attachment; filename*=UTF-8''${encodeRfc3986(download)}`;
-      res.writeHead(200, headers);
-      return Readable.fromWeb(r.body).pipe(res);
+      if (download) extra['content-disposition'] = `attachment; filename*=UTF-8''${encodeRfc3986(download)}`;
+      return sendB2File(req, res, key, extra);
     }
 
     // Sobrescribir: PUT /api/files?key=...  (cuerpo = bytes)

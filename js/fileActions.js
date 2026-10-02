@@ -102,22 +102,89 @@ function readLocal(file) {
 
 // Importa archivos del ordenador real a `dir`. Si el servidor tiene B2
 // configurado se suben a Backblaze; si no, se guardan en el navegador.
-export async function importFiles(dir, files) {
+// `items` son File o { file, rel } con la ruta dentro de una carpeta subida
+// ("Fotos/2024/a.jpg"); `emptyDirs` son carpetas vacías de esa misma subida.
+export async function importFiles(dir, items, emptyDirs = []) {
+  const list = items.map((it) => (it instanceof File ? { file: it, rel: it.name } : it));
+  if (!list.length && !emptyDirs.length) return;
+  // Si ya existe una carpeta con el mismo nombre que la subida, se usa "Nombre (2)".
+  const tops = new Map();
+  const mapRel = (rel) => {
+    const [top, ...rest] = rel.split('/');
+    if (!rest.length) return rel;
+    if (!tops.has(top)) tops.set(top, fs.uniqueName(dir, top));
+    return [tops.get(top), ...rest].join('/');
+  };
+  for (const d of emptyDirs) fs.ensureDir(fs.join(dir, mapRel(d)));
+  const many = list.length > 1;
+  const totalBytes = list.reduce((a, it) => a + it.file.size, 0) || 1;
+  let doneBytes = 0;
+  let doneFiles = 0;
+  const label = storage.enabled() ? 'Subiendo a B2' : 'Importando';
+  const note = toast(many ? `${label} ${list.length} archivos…` : `${label} "${list[0]?.file.name}"…`);
   const errors = [];
-  for (const file of files) {
-    const target = () => fs.join(dir, fs.uniqueName(dir, file.name));
-    const note = toast(storage.enabled() ? `Subiendo "${file.name}" a B2…` : `Importando "${file.name}"…`);
+  const upload = async ({ file, rel }) => {
+    const path = mapRel(rel);
+    const parent = fs.join(dir, fs.dirname(`/${path}`));
+    fs.ensureDir(parent);
+    const target = () => fs.join(parent, fs.uniqueName(parent, file.name));
+    let partial = 0;
+    const pct = (p) => {
+      partial = p * file.size;
+      note.update(
+        many
+          ? `${label}: ${doneFiles} de ${list.length} archivos · ${Math.floor(((doneBytes + partial) / totalBytes) * 100)}%`
+          : `${label} "${file.name}"… ${Math.floor(p * 100)}%`,
+      );
+    };
     try {
-      const pct = (p) => note.update(`Subiendo "${file.name}" a B2… ${Math.floor(p * 100)}%`);
       if (storage.enabled()) fs.writeRemote(target(), await storage.upload(file, file.name, pct));
       else fs.writeFile(target(), await readLocal(file));
-      note.done(storage.enabled() ? `"${file.name}" guardado en B2` : `"${file.name}" importado`);
     } catch (e) {
-      note.done(`Error con "${file.name}"`, true);
-      errors.push(`${file.name}: ${e.message}`);
+      errors.push(`${path}: ${e.message}`);
     }
-  }
-  if (errors.length) await alert('Error al subir', errors.join('\n'));
+    doneBytes += file.size;
+    doneFiles++;
+    pct(0);
+  };
+  // De a 3 a la vez: con muchas fotos chicas es bastante más rápido que de a una.
+  let next = 0;
+  const worker = async () => {
+    while (next < list.length) await upload(list[next++]);
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  const ok = list.length - errors.length;
+  if (!list.length) note.done(`Carpeta creada`);
+  else if (errors.length) note.done(`${ok} de ${list.length} archivos subidos`, true);
+  else note.done(many ? `${list.length} archivos ${storage.enabled() ? 'guardados en B2' : 'importados'}` : `"${list[0].file.name}" ${storage.enabled() ? 'guardado en B2' : 'importado'}`);
+  if (errors.length) await alert('Error al subir', errors.slice(0, 20).join('\n') + (errors.length > 20 ? `\n… y ${errors.length - 20} más` : ''));
+}
+
+// Lee lo que se soltó al arrastrar desde el ordenador, incluidas carpetas enteras.
+// Hay que pedir las entradas dentro del propio evento drop, antes de cualquier await.
+export async function importDrop(dir, dataTransfer) {
+  const entries = [...dataTransfer.items].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return importFiles(dir, [...dataTransfer.files]);
+  const files = [];
+  const emptyDirs = [];
+  const readAll = (reader) =>
+    new Promise((resolve, reject) => {
+      const out = [];
+      const batch = () =>
+        reader.readEntries((chunk) => (chunk.length ? (out.push(...chunk), batch()) : resolve(out)), reject);
+      batch();
+    });
+  const walk = async (entry, rel) => {
+    if (entry.isFile) {
+      files.push({ file: await new Promise((res, rej) => entry.file(res, rej)), rel });
+    } else if (entry.isDirectory) {
+      const children = await readAll(entry.createReader());
+      if (!children.length) emptyDirs.push(rel);
+      for (const child of children) await walk(child, `${rel}/${child.name}`);
+    }
+  };
+  for (const entry of entries) await walk(entry, entry.name);
+  return importFiles(dir, files, emptyDirs);
 }
 
 export function uploadInto(dir) {
@@ -125,6 +192,15 @@ export function uploadInto(dir) {
   input.type = 'file';
   input.multiple = true;
   input.onchange = () => importFiles(dir, [...input.files]);
+  input.click();
+}
+
+// "Subir carpeta…": el navegador da cada archivo con su ruta relativa.
+export function uploadFolderInto(dir) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.webkitdirectory = true;
+  input.onchange = () => importFiles(dir, [...input.files].map((file) => ({ file, rel: file.webkitRelativePath || file.name })));
   input.click();
 }
 
@@ -167,6 +243,7 @@ export function folderMenu(e, dir, extra = []) {
     { label: 'Nueva carpeta', action: () => newFolder(dir) },
     { label: 'Nuevo archivo de texto', action: () => newFile(dir) },
     { label: 'Subir archivos…', action: () => uploadInto(dir) },
+    { label: 'Subir carpeta…', action: () => uploadFolderInto(dir) },
     ...extra,
   ]);
 }
