@@ -127,6 +127,7 @@ navegador ──wss /api/pty──▶ server.js (usuario miputer)
 
 - El WebSocket solo se acepta con la cookie de sesión válida (`isAuthenticated`) y con la cabecera `Origin` del propio sitio (o una de `ALLOWED_ORIGINS`). Sin `MIPUTER_PASSWORD` la app no se activa nunca.
 - `mpclaude` no tiene sudo, y su servicio usa `NoNewPrivileges`, sistema de archivos de solo lectura salvo su carpeta, `/tmp` privado y no ve `/home/miputer`, `/home/ubuntu`, `/home/jaz`, `/var/www`, `/etc/nginx` ni `/etc/letsencrypt`. Tampoco puede leer el `.env` de MiPuter.
+- En red, Claude tiene internet pero no llega a nada del propio servidor: `IPAddressDeny` bloquea `127.0.0.0/8`, `::1` y las IPs públicas del VPS (Redis, Postgres, pgbouncer y las otras apps), salvo el DNS local `127.0.0.53`.
 - La configuración de tmux (`/etc/miputer-claude/tmux.conf`) es de root, así que Claude no puede cambiar quién se conecta a sus sesiones.
 - xterm.js se carga desde jsDelivr con hash de integridad (SRI).
 
@@ -146,6 +147,7 @@ Así está desplegado en un VPS Ubuntu 24.04 que ya tenía nginx y otras apps.
 | Servicio web | `miputer.service` ([deploy/miputer.service](deploy/miputer.service)): `Restart=always`, arranca con el sistema, `NoNewPrivileges`, `ProtectSystem=strict` + `ReadWritePaths=/home/miputer`, `PrivateTmp` |
 | Servicio Claude | `miputer-claude.service` ([deploy/miputer-claude.service](deploy/miputer-claude.service)): servidor tmux como `mpclaude`, con [deploy/tmux.conf](deploy/tmux.conf) en `/etc/miputer-claude/` |
 | Proxy + HTTPS | nginx ([deploy/nginx-miputer.conf](deploy/nginx-miputer.conf)) → `127.0.0.1:8000`, con WebSocket. Certificado de Let's Encrypt con `certbot --nginx`, que se renueva solo |
+| nginx por defecto | `/etc/nginx/sites-available/00-default-https`: un dominio que llega por HTTPS sin server block propio recibe la conexión rechazada (`ssl_reject_handshake`) en vez de ver otro sitio del servidor |
 | Firewall | ufw: SSH, 80 y 443 (más los puertos de otras apps que ya había). El 8000 solo escucha en `127.0.0.1` |
 
 **Editar la configuración** (contraseña y claves de B2):
