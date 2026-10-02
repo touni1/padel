@@ -135,10 +135,10 @@ export default {
       const url = new URL(`api/pty?slot=${n}&cols=${term.cols}&rows=${term.rows}`, location.href);
       url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const ws = new WebSocket(url);
-      let frame = 0;
+      let timer = 0;
       const observer = new ResizeObserver(() => {
-        cancelAnimationFrame(frame);
-        frame = requestAnimationFrame(() => main.offsetWidth && fit.fit());
+        clearTimeout(timer);
+        timer = setTimeout(() => main.offsetWidth && fit.fit(), 50);
       });
       observer.observe(main);
       const c = (conn = { ws, term, observer, closing: false, opened: false });
