@@ -13,16 +13,25 @@ import calculator from './apps/calculator.js';
 import browser from './apps/browser.js';
 import viewer from './apps/viewer.js';
 import settings from './apps/settings.js';
+import trash from './apps/trash.js';
 
 const DESKTOP_DIR = '/Escritorio';
 
-[files, editor, terminal, claude, calculator, browser, viewer, settings].forEach(register);
+[files, editor, terminal, claude, calculator, browser, viewer, settings, trash].forEach(register);
 
 function appIcon(app) {
   const el = document.createElement('div');
   el.className = 'icon';
   el.innerHTML = `<span class="glyph">${app.glyph}</span><span>${escapeHtml(app.name)}</span>`;
   el.ondblclick = () => launch(app.id);
+  if (app.onDrop) {
+    el.ondragover = (e) => e.preventDefault();
+    el.ondrop = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      app.onDrop(e.dataTransfer.getData('text/x-miputer-path'));
+    };
+  }
   return el;
 }
 
@@ -113,7 +122,10 @@ function wireDesktop() {
 applySettings();
 renderDesktop();
 renderStartMenu();
-storage.init().then(renderStartMenu);
+storage.init().then(() => {
+  renderStartMenu();
+  fs.purgeTrash();
+});
 startClock();
 wireDesktop();
 fs.onChange(renderDesktop);

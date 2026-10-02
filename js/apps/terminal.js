@@ -22,7 +22,7 @@ const HELP = `Comandos disponibles:
   echo <texto> [> f]   Escribe texto (o lo guarda en un archivo con > o >>)
   touch <archivo>      Crea un archivo vacío
   mkdir <carpeta>      Crea una carpeta
-  rm <ruta>            Elimina un archivo o carpeta
+  rm <ruta>            Mueve a la papelera (dentro de ella, borra)
   mv <origen> <dest>   Mueve o renombra
   cp <origen> <dest>   Copia
   open <ruta|app>      Abre un archivo, carpeta o aplicación
@@ -105,7 +105,7 @@ export default {
       },
       rm: ([p]) => {
         need(p, 'rm <ruta>');
-        fs.rm(resolve(p));
+        fs.trash(resolve(p));
       },
       mv: ([a, b]) => {
         need(a && b, 'mv <origen> <destino>');

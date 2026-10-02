@@ -131,11 +131,11 @@ async function setupB2(section) {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
       form.appKey.value = '';
-      toast(`B2 configurado: bucket "${data.bucket}"`);
+      toast(`B2 configurado: bucket "${data.bucket}"`).done();
       await storage.init();
       show(await (await fetch('api/b2-config')).json());
     } catch (err) {
-      toast(err.message);
+      toast(err.message).done(err.message, true);
     } finally {
       button.disabled = false;
       button.textContent = 'Probar y guardar';

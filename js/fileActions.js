@@ -21,8 +21,14 @@ export async function renameEntry(path) {
   }
 }
 
+// Fuera de la papelera, eliminar la mueve ahí; dentro, la borra para siempre.
 export async function deleteEntry(path) {
-  if (await confirm('Eliminar', `¿Eliminar "${fs.basename(path)}"? Esta acción no se puede deshacer.`)) {
+  if (!fs.normalize(path).startsWith(fs.TRASH + '/')) {
+    await reportError(() => {
+      fs.trash(path);
+      toast(`"${fs.basename(path)}" movido a la papelera`).done();
+    });
+  } else if (await confirm('Eliminar', `¿Eliminar "${fs.basename(path)}" para siempre? Esta acción no se puede deshacer.`)) {
     await reportError(() => fs.rm(path));
   }
 }
@@ -92,7 +98,7 @@ export function entryMenu(e, path) {
     { label: 'Duplicar', action: () => duplicateEntry(path) },
   ];
   if (!fs.isDir(path)) items.push({ label: 'Descargar', action: () => download(path) });
-  items.push('sep', { label: 'Eliminar', action: () => deleteEntry(path) });
+  items.push('sep', { label: path.startsWith(fs.TRASH + '/') ? 'Eliminar para siempre' : 'Eliminar', action: () => deleteEntry(path) });
   contextMenu(e.clientX, e.clientY, items);
 }
 
@@ -142,5 +148,6 @@ export function renderIcons(container, dir, { onOpen = openPath } = {}) {
 export function moveInto(e, dir) {
   const src = e.dataTransfer.getData('text/x-miputer-path');
   if (!src || fs.dirname(src) === fs.normalize(dir) || src === fs.normalize(dir)) return;
+  if (fs.normalize(dir) === fs.TRASH) return reportError(() => fs.trash(src));
   reportError(() => fs.rename(src, fs.join(dir, fs.uniqueName(dir, fs.basename(src)))));
 }

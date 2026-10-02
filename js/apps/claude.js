@@ -170,14 +170,14 @@ export default {
       if (!(await confirm('Terminar sesión', `¿Cerrar Claude en la sesión ${n}? Se pierde lo que no esté guardado en la conversación.`))) return;
       try {
         await api(`api/claude/kill?slot=${n}`, { method: 'POST' });
-        toast(`Sesión ${n} terminada`);
+        toast(`Sesión ${n} terminada`).done();
         picker();
       } catch (e) {
-        toast(e.message);
+        toast(e.message).done(e.message, true);
       }
     };
     win.beforeClose = () => {
-      if (conn?.opened) toast(`La sesión ${slot} sigue en segundo plano. Retómala desde Claude.`);
+      if (conn?.opened) toast(`La sesión ${slot} sigue en segundo plano. Retómala desde Claude.`).done();
       disconnect();
       return true;
     };

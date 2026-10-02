@@ -229,10 +229,106 @@ export function rm(path) {
   persist();
 }
 
+// ---------------------------------------------------------------------------
+// Papelera: los elementos eliminados se mueven a /Papelera con { from, at } y no
+// se borran de B2 hasta vaciarla, eliminarlos de ahí o pasar TRASH_DAYS días.
+// ---------------------------------------------------------------------------
+
+export const TRASH = '/Papelera';
+export const TRASH_DAYS = 30;
+
+export const inTrash = (path) => dirname(path) === TRASH;
+
+function trashDir() {
+  if (root.children.Papelera?.type !== 'dir') root.children.Papelera = { type: 'dir', children: {}, mtime: now() };
+  return root.children.Papelera;
+}
+
+// Mueve a la papelera; si ya está dentro (o dentro de algo que está en ella), la elimina para siempre.
+export function trash(path) {
+  const p = normalize(path);
+  if (p === TRASH) throw new Error('No se puede eliminar la papelera');
+  if (p.startsWith(TRASH + '/')) return rm(p);
+  const { parent, name } = getParent(p);
+  const node = parent.children[name];
+  if (!node) throw new Error(`No existe: ${path}`);
+  const dir = trashDir();
+  const target = uniqueName(TRASH, name);
+  delete parent.children[name];
+  parent.mtime = now();
+  node.trashed = { from: p, at: now() };
+  dir.children[target] = node;
+  persist();
+}
+
+// Lo eliminado, con su ruta original y los días que le quedan antes de borrarse solo.
+export function listTrash() {
+  return Object.entries(trashDir().children)
+    .map(([name, node]) => {
+      const at = node.trashed?.at ?? node.mtime;
+      return {
+        name,
+        path: join(TRASH, name),
+        type: node.type,
+        remote: node.remote || null,
+        from: node.trashed?.from ?? null,
+        at,
+        daysLeft: Math.max(0, Math.ceil((at + TRASH_DAYS * 86400_000 - now()) / 86400_000)),
+      };
+    })
+    .sort((a, b) => b.at - a.at);
+}
+
+// Devuelve el elemento a su carpeta original (la recrea si ya no existe) y devuelve la ruta final.
+export function restore(path) {
+  const p = normalize(path);
+  if (!inTrash(p)) throw new Error(`No está en la papelera: ${path}`);
+  const dir = trashDir();
+  const node = dir.children[basename(p)];
+  if (!node) throw new Error(`No existe: ${path}`);
+  const from = node.trashed?.from || join('/Escritorio', basename(p));
+  const destDir = dirname(from);
+  let cur = root;
+  for (const part of destDir.split('/').filter(Boolean)) {
+    if (cur.children[part]?.type !== 'dir') cur.children[part] = { type: 'dir', children: {}, mtime: now() };
+    cur = cur.children[part];
+  }
+  const target = uniqueName(destDir, basename(from));
+  delete dir.children[basename(p)];
+  delete node.trashed;
+  cur.children[target] = node;
+  cur.mtime = now();
+  persist();
+  return join(destDir, target);
+}
+
+export function emptyTrash() {
+  const dir = trashDir();
+  deleteRemote(dir);
+  dir.children = {};
+  persist();
+}
+
+// Borra para siempre lo que lleva más de TRASH_DAYS días en la papelera.
+export function purgeTrash() {
+  const dir = root.children.Papelera;
+  if (dir?.type !== 'dir') return 0;
+  const limit = now() - TRASH_DAYS * 86400_000;
+  const old = Object.entries(dir.children).filter(([, n]) => (n.trashed?.at ?? n.mtime) < limit);
+  for (const [name, node] of old) {
+    deleteRemote(node);
+    delete dir.children[name];
+  }
+  if (old.length) persist();
+  return old.length;
+}
+
 export function rename(from, to) {
+  if (normalize(from) === TRASH) throw new Error('La papelera no se puede renombrar ni mover');
   const src = getParent(from);
   const node = src.parent.children[src.name];
   if (!node) throw new Error(`No existe: ${from}`);
+  if (dirname(to) !== TRASH) delete node.trashed;
   const dst = getParent(to);
   validName(dst.name);
   if (dst.parent.children[dst.name]) throw new Error(`Ya existe: ${to}`);

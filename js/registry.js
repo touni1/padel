@@ -23,6 +23,7 @@ export function launch(id, args = {}) {
 
 // Abre una ruta con la aplicación adecuada.
 export function openPath(path) {
+  if (fs.normalize(path) === fs.TRASH) return launch('trash');
   if (fs.isDir(path)) return launch('files', { path });
   const ext = fs.extname(path);
   const app = list().find((a) => a.extensions?.includes(ext)) || apps.get('editor');

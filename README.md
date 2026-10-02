@@ -9,6 +9,7 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 - **Escritorio** con iconos, menú contextual (clic derecho), arrastrar y soltar, y barra de tareas con reloj.
 - **Gestor de ventanas**: mover, redimensionar, minimizar, maximizar (doble clic en la barra de título) y enfocar.
 - **Sistema de archivos virtual** persistente en `localStorage` (carpetas, archivos, renombrar, duplicar, eliminar, mover).
+- **Papelera**: *Eliminar* (o arrastrar al icono 🗑️, o `rm` en la Terminal) mueve a la papelera; los archivos de B2 no se borran hasta vaciarla, eliminarlos desde ahí o pasar 30 días. Combina bien con una regla de ciclo de vida en el bucket (p. ej. borrar versiones ocultas a los 30 días) como segunda red.
 - Subida de archivos desde tu ordenador (botón ⤒ o arrastrándolos al escritorio o al explorador) y descarga.
 - **Archivos subidos guardados en Backblaze B2** (llevan una nube ☁ en el icono). Se pueden abrir, editar, duplicar, descargar y borrar; los cambios se aplican también en B2.
 
@@ -23,6 +24,7 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 | 🧮 Calculadora | Con paréntesis y soporte de teclado (sin `eval`) |
 | 🌐 Navegador | Navega URLs en un iframe o muestra archivos `.html` del sistema virtual |
 | 🖼️ Visor de imágenes | Abre imágenes subidas |
+| 🗑️ Papelera | Lo eliminado va aquí: restaurar a su sitio, eliminar para siempre o vaciar. Se borra solo a los 30 días |
 | ⚙️ Ajustes | Fondos de escritorio, tema claro/oscuro y restablecer archivos |
 
 ## Cómo ejecutarlo
