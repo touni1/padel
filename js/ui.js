@@ -94,6 +94,9 @@ export function toast(text) {
   el.textContent = text;
   box.appendChild(el);
   return {
+    update(newText) {
+      el.textContent = newText;
+    },
     done(finalText = text, error = false) {
       el.textContent = finalText;
       el.classList.toggle('error', error);

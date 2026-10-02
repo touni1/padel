@@ -14,10 +14,11 @@ import browser from './apps/browser.js';
 import viewer from './apps/viewer.js';
 import settings from './apps/settings.js';
 import trash from './apps/trash.js';
+import shares from './apps/shares.js';
 
 const DESKTOP_DIR = '/Escritorio';
 
-[files, editor, terminal, claude, calculator, browser, viewer, settings, trash].forEach(register);
+[files, editor, terminal, claude, calculator, browser, viewer, settings, shares, trash].forEach(register);
 
 function appIcon(app) {
   const el = document.createElement('div');
@@ -39,7 +40,7 @@ function renderDesktop() {
   const container = document.getElementById('desktop-icons');
   if (!fs.isDir(DESKTOP_DIR)) fs.mkdir(DESKTOP_DIR);
   renderIcons(container, DESKTOP_DIR);
-  const shortcuts = list().filter((a) => !a.hidden && a.id !== 'editor').map(appIcon);
+  const shortcuts = list().filter((a) => !a.hidden && a.desktop !== false && a.id !== 'editor').map(appIcon);
   container.prepend(...shortcuts);
 }
 

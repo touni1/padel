@@ -431,3 +431,20 @@ input, textarea, select {
 .trash-meta b, .trash-meta small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trash-meta small { color: var(--text-muted); }
 .trash-empty { text-align: center; color: var(--text-muted); margin-top: 48px; }
+
+/* Enlaces compartidos */
+.share { padding: 16px; display: grid; gap: 12px; align-content: start; height: 100%; overflow: auto; }
+.share p, .share h3 { margin: 0; }
+.share h3 { font-size: 14px; margin-top: 6px; }
+.share .muted { color: var(--text-muted); font-size: 13px; }
+.share-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.share-form label { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.share-result { display: flex; gap: 6px; }
+.share-result input { flex: 1; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+.share-list { display: grid; gap: 6px; }
+.share-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); }
+.share-meta { flex: 1; min-width: 0; display: grid; }
+.share-meta b, .share-meta small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-meta b { font-weight: 600; font-size: 13px; }
+.share-meta small { color: var(--text-muted); }

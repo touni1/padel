@@ -17,7 +17,11 @@ const ROOT = fileURLToPath(new URL('.', import.meta.url));
 if (existsSync(join(ROOT, '.env'))) process.loadEnvFile(join(ROOT, '.env'));
 
 const PORT = Number(process.env.PORT || 8000);
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 100) * 1024 * 1024;
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 5120) * 1024 * 1024;
+// Hasta este tamaño un archivo se sube de una vez (y se guarda entero en memoria);
+// los más grandes se suben por partes de PART_BYTES (subida multiparte de B2).
+const SINGLE_UPLOAD_BYTES = 100 * 1024 * 1024;
+const PART_BYTES = 64 * 1024 * 1024;
 const PREFIX = (process.env.B2_PREFIX || 'miputer').replace(/^\/+|\/+$/g, '') + '/';
 
 // Credenciales de B2: las de .b2.json (guardadas desde Ajustes) mandan sobre las del .env.
@@ -125,6 +129,7 @@ function clientIp(req) {
 function formPage({ action, intro, fields, button, error = '' }) {
   return `<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
 <title>MiPuter</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>◆</text></svg>">
 <style>
@@ -282,8 +287,8 @@ function objectUrl(key, cfg = b2) {
   return `${cfg.endpoint}/${encodeRfc3986(cfg.bucket)}/${key.split('/').map(encodeRfc3986).join('/')}`;
 }
 
-async function b2Request(method, key, { body, headers = {} } = {}, cfg = b2) {
-  const url = objectUrl(key, cfg);
+async function b2Request(method, key, { body, headers = {}, query = '' } = {}, cfg = b2) {
+  const url = objectUrl(key, cfg) + query;
   const payload = body ?? Buffer.alloc(0);
   const signed = signRequest({
     method,
@@ -522,6 +527,238 @@ async function handleTree(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// Subida por partes (/api/uploads) para archivos de más de 100 MB
+// ---------------------------------------------------------------------------
+//
+// El navegador trocea el archivo y manda cada parte; el servidor la reenvía a B2
+// (UploadPart) y al final pide a B2 que las una. Las subidas a medias se anulan
+// solas a las 24 h para que no ocupen espacio en el bucket.
+
+const uploads = new Map(); // id -> { key, type, size, name, b2Id, etags: [], created }
+const xmlTag = (xml, tag) => xml.match(new RegExp(`<${tag}>([^<]*)</${tag}>`))?.[1];
+
+async function handleUploads(req, res, url) {
+  const route = url.pathname;
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+
+  if (route === '/api/uploads' && req.method === 'POST') {
+    const size = Number(url.searchParams.get('size'));
+    if (!Number.isFinite(size) || size <= 0) return sendJson(res, 400, { error: 'Tamaño no válido' });
+    if (size > MAX_UPLOAD_BYTES) return sendJson(res, 413, { error: `El archivo supera el límite de ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024 / 1024)} GB` });
+    const name = url.searchParams.get('name');
+    const type = url.searchParams.get('type') || 'application/octet-stream';
+    const key = newKey(name);
+    const r = await b2Request('POST', key, { query: '?uploads', headers: { 'content-type': type } });
+    const b2Id = xmlTag(await r.text(), 'UploadId');
+    if (!b2Id) throw Object.assign(new Error('B2 no devolvió el identificador de la subida'), { status: 502 });
+    const id = crypto.randomUUID();
+    uploads.set(id, { key, type, size, b2Id, etags: [], created: Date.now() });
+    return sendJson(res, 201, { id, key, partSize: PART_BYTES, parts: Math.ceil(size / PART_BYTES) });
+  }
+
+  const up = uploads.get(url.searchParams.get('id'));
+  if (!up) return sendJson(res, 404, { error: 'La subida no existe o caducó' });
+
+  if (route === '/api/uploads/part' && req.method === 'PUT') {
+    const n = Number(url.searchParams.get('n'));
+    if (!Number.isInteger(n) || n < 1 || n > Math.ceil(up.size / PART_BYTES)) return sendJson(res, 400, { error: 'Parte no válida' });
+    const body = await readBody(req, PART_BYTES);
+    const r = await b2Request('PUT', up.key, { body, query: `?partNumber=${n}&uploadId=${encodeRfc3986(up.b2Id)}` });
+    up.etags[n - 1] = r.headers.get('etag');
+    return sendJson(res, 200, { n });
+  }
+
+  if (route === '/api/uploads/complete' && req.method === 'POST') {
+    const total = Math.ceil(up.size / PART_BYTES);
+    if (up.etags.filter(Boolean).length !== total) return sendJson(res, 400, { error: 'Faltan partes por subir' });
+    const xml = `<CompleteMultipartUpload>${up.etags.map((e, i) => `<Part><PartNumber>${i + 1}</PartNumber><ETag>${e}</ETag></Part>`).join('')}</CompleteMultipartUpload>`;
+    const r = await b2Request('POST', up.key, { body: Buffer.from(xml), query: `?uploadId=${encodeRfc3986(up.b2Id)}`, headers: { 'content-type': 'application/xml' } });
+    const text = await r.text();
+    if (text.includes('<Error>')) throw Object.assign(new Error(`B2: ${xmlTag(text, 'Message') || 'no se pudo completar la subida'}`), { status: 502 });
+    uploads.delete(url.searchParams.get('id'));
+    return sendJson(res, 201, { key: up.key, size: up.size, type: up.type });
+  }
+
+  if (route === '/api/uploads' && req.method === 'DELETE') {
+    uploads.delete(url.searchParams.get('id'));
+    await b2Request('DELETE', up.key, { query: `?uploadId=${encodeRfc3986(up.b2Id)}` }).catch(() => {});
+    return sendJson(res, 200, { ok: true });
+  }
+  return sendJson(res, 404, { error: 'Ruta no encontrada' });
+}
+
+setInterval(() => {
+  for (const [id, up] of uploads) {
+    if (Date.now() - up.created < 24 * 3600_000) continue;
+    uploads.delete(id);
+    b2Request('DELETE', up.key, { query: `?uploadId=${encodeRfc3986(up.b2Id)}` }).catch(() => {});
+  }
+}, 3600_000).unref();
+
+// ---------------------------------------------------------------------------
+// Enlaces de descarga para compartir (/d/<token>)
+// ---------------------------------------------------------------------------
+//
+// Un enlace da acceso a UN archivo de B2 sin iniciar sesión, hasta que caduca,
+// se agotan sus descargas o se desactiva. El token es aleatorio (192 bits) y los
+// enlaces se guardan en data/enlaces.json.
+
+const SHARES_FILE = join(DATA_DIR, 'enlaces.json');
+const SHARE_HOURS = [1, 24, 24 * 7, 24 * 30];
+let shares = existsSync(SHARES_FILE) ? JSON.parse(readFileSync(SHARES_FILE, 'utf8')) : {};
+
+function saveShares() {
+  mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  const tmp = `${SHARES_FILE}.tmp`;
+  writeFileSync(tmp, JSON.stringify(shares), { mode: 0o600 });
+  renameSync(tmp, SHARES_FILE);
+}
+
+const shareAlive = (sh) => sh.expires > Date.now() && (!sh.maxDownloads || sh.downloads < sh.maxDownloads);
+
+function purgeShares() {
+  const dead = Object.keys(shares).filter((t) => !shareAlive(shares[t]));
+  dead.forEach((t) => delete shares[t]);
+  if (dead.length) saveShares();
+}
+
+function siteOrigin(req) {
+  const proto = (process.env.TRUST_PROXY === 'true' && req.headers['x-forwarded-proto']?.split(',')[0].trim()) || 'http';
+  return `${proto}://${req.headers.host}`;
+}
+
+const shareView = (req, token, sh) => ({
+  token,
+  url: `${siteOrigin(req)}/d/${token}`,
+  key: sh.key,
+  name: sh.name,
+  size: sh.size,
+  created: sh.created,
+  expires: sh.expires,
+  downloads: sh.downloads,
+  maxDownloads: sh.maxDownloads,
+});
+
+async function handleSharesApi(req, res, url) {
+  purgeShares();
+  if (req.method === 'GET') {
+    const list = Object.entries(shares).map(([t, sh]) => shareView(req, t, sh)).sort((a, b) => b.created - a.created);
+    return sendJson(res, 200, list);
+  }
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  if (req.method === 'DELETE') {
+    delete shares[url.searchParams.get('token')];
+    saveShares();
+    return sendJson(res, 200, { ok: true });
+  }
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Método no permitido' });
+  if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
+  let input;
+  try {
+    input = JSON.parse((await readBody(req, 8192)).toString());
+  } catch {
+    return sendJson(res, 400, { error: 'Datos no válidos' });
+  }
+  const key = checkKey(input.key);
+  const hours = Number(input.hours);
+  if (!SHARE_HOURS.includes(hours)) return sendJson(res, 400, { error: 'Duración no válida' });
+  const maxDownloads = input.maxDownloads ? Math.min(1000, Math.max(1, Math.floor(Number(input.maxDownloads)))) : null;
+  const head = await b2Request('HEAD', key); // también comprueba que el archivo existe
+  const token = crypto.randomBytes(24).toString('base64url');
+  shares[token] = {
+    key,
+    name: String(input.name || key.slice(PREFIX.length + 37) || 'archivo').slice(0, 200),
+    size: Number(head.headers.get('content-length')) || 0,
+    created: Date.now(),
+    expires: Date.now() + hours * 3600_000,
+    maxDownloads,
+    downloads: 0,
+  };
+  saveShares();
+  return sendJson(res, 201, shareView(req, token, shares[token]));
+}
+
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const human = (n) => (n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`);
+
+function sharePage(res, status, body) {
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    'referrer-policy': 'no-referrer',
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+  });
+  res.end(`<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Descarga · MiPuter</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>◆</text></svg>">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(circle at 20% 20%, #3a5a8c 0%, #1d2b44 55%, #111a2b 100%); color: #1c2230; }
+  main { width: 100%; max-width: 380px; padding: 28px; border-radius: 14px; background: #fff;
+    box-shadow: 0 12px 32px rgba(0,0,0,.35); display: grid; gap: 12px; text-align: center; }
+  .icon { font-size: 44px; }
+  h1 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+  p { margin: 0; color: #6b7385; font-size: 14px; }
+  a.btn { display: block; font-weight: 600; padding: 11px; border-radius: 8px; background: #3b82f6; color: #fff; text-decoration: none; }
+</style></head>
+<body><main>${body}</main></body></html>`);
+}
+
+async function handleShareDownload(req, res, url) {
+  const [, , token, action] = url.pathname.split('/');
+  purgeShares();
+  const sh = token && Object.hasOwn(shares, token) ? shares[token] : null;
+  if (!sh) {
+    return sharePage(res, 404, '<div class="icon">⌛</div><h1>Este enlace no existe o ya caducó</h1><p>Pídele a quien te lo mandó uno nuevo.</p>');
+  }
+  if (action === 'descargar') {
+    let r;
+    try {
+      r = await b2Request('GET', sh.key);
+    } catch (e) {
+      if (e.status === 404) return sharePage(res, 404, '<div class="icon">🗑️</div><h1>El archivo ya no está disponible</h1>');
+      throw e;
+    }
+    sh.downloads++;
+    saveShares();
+    const headers = {
+      'content-type': 'application/octet-stream',
+      'content-disposition': `attachment; filename*=UTF-8''${encodeRfc3986(sh.name)}`,
+      'x-content-type-options': 'nosniff',
+      'cache-control': 'no-store',
+      'referrer-policy': 'no-referrer',
+    };
+    if (r.headers.get('content-length')) headers['content-length'] = r.headers.get('content-length');
+    res.writeHead(200, headers);
+    return Readable.fromWeb(r.body).pipe(res);
+  }
+  if (action) return sharePage(res, 404, '<h1>No encontrado</h1>');
+  const left = sh.maxDownloads ? ` · quedan ${sh.maxDownloads - sh.downloads} descargas` : '';
+  const until = new Date(sh.expires).toLocaleString('es-ES', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' });
+  return sharePage(
+    res,
+    200,
+    `<div class="icon">📦</div><h1>${esc(sh.name)}</h1><p>${human(sh.size)} · disponible hasta el ${esc(until)}${left}</p>
+     <a class="btn" href="/d/${esc(token)}/descargar">Descargar</a><p>Compartido desde MiPuter</p>`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Robots y buscadores: fuera
+// ---------------------------------------------------------------------------
+//
+// robots.txt lo respetan los buscadores serios; a los demás bots conocidos
+// (buscadores, IA, SEO) se les responde 403. La cabecera X-Robots-Tag va en todas
+// las respuestas por si algo se cuela.
+
+const BLOCKED_BOTS =
+  /googlebot|google-extended|googleother|google-inspectiontool|adsbot|mediapartners|apis-google|storebot|bingbot|bingpreview|msnbot|adidxbot|slurp|duckduckbot|baiduspider|yandex|sogou|exabot|seznambot|petalbot|applebot|amazonbot|gptbot|chatgpt-user|oai-searchbot|ccbot|claudebot|claude-web|claude-searchbot|anthropic-ai|perplexitybot|perplexity-user|youbot|cohere-ai|bytespider|meta-externalagent|meta-externalfetcher|facebookbot|diffbot|imagesiftbot|omgili|timpibot|ahrefsbot|semrushbot|mj12bot|dotbot|dataforseobot|blexbot|serpstatbot|barkrowler|seekportbot|ia_archiver|archive\.org_bot|heritrix|scrapy|crawler|spider/i;
+
+// ---------------------------------------------------------------------------
 // Configurar B2 desde Ajustes
 // ---------------------------------------------------------------------------
 //
@@ -619,11 +856,16 @@ async function handleApi(req, res, url) {
   if (route.startsWith('/api/claude') && (await handleClaudeApi(req, res, url)) !== false) return;
   if (route === '/api/b2-config') return handleB2Config(req, res);
   if (route === '/api/tree') return handleTree(req, res);
+  if (route === '/api/shares') return handleSharesApi(req, res, url);
+  if (route.startsWith('/api/uploads')) {
+    if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
+    return handleUploads(req, res, url);
+  }
   if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
 
   // Subir un archivo nuevo: POST /api/files?name=foto.png  (cuerpo = bytes)
   if (route === '/api/files' && method === 'POST') {
-    const body = await readBody(req);
+    const body = await readBody(req, SINGLE_UPLOAD_BYTES);
     const key = newKey(url.searchParams.get('name'));
     const type = req.headers['content-type'] || 'application/octet-stream';
     await b2Request('PUT', key, { body, headers: { 'content-type': type } });
@@ -657,7 +899,7 @@ async function handleApi(req, res, url) {
 
     // Sobrescribir: PUT /api/files?key=...  (cuerpo = bytes)
     if (method === 'PUT') {
-      const body = await readBody(req);
+      const body = await readBody(req, SINGLE_UPLOAD_BYTES);
       await b2Request('PUT', key, { body, headers: { 'content-type': req.headers['content-type'] || 'application/octet-stream' } });
       return sendJson(res, 200, { key, size: body.length });
     }
@@ -700,7 +942,18 @@ function serveStatic(req, res, url) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  res.setHeader('x-robots-tag', 'noindex, nofollow, noarchive, nosnippet, noimageindex');
   try {
+    if (url.pathname === '/robots.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('User-agent: *\nDisallow: /\n');
+    }
+    if (BLOCKED_BOTS.test(req.headers['user-agent'] || '')) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('Acceso no permitido a robots.\n');
+    }
+    // Enlaces compartidos: públicos, sin iniciar sesión.
+    if (url.pathname.startsWith('/d/') && req.method === 'GET') return await handleShareDownload(req, res, url);
     if (auth.enabled && (await handleAuth(req, res, url)) !== false) return;
     if (!isAuthenticated(req)) {
       if (url.pathname.startsWith('/api/')) return sendJson(res, 401, { error: 'Sesión caducada: vuelve a iniciar sesión' });

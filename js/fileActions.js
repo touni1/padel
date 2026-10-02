@@ -3,6 +3,7 @@ import * as fs from './fs.js';
 import { openPath, glyphFor } from './registry.js';
 import * as storage from './storage.js';
 import { prompt, confirm, alert, contextMenu, reportError, escapeHtml, toast } from './ui.js';
+import { shareFile } from './apps/shares.js';
 
 export async function newFolder(dir) {
   const name = await prompt('Nueva carpeta', 'Nombre de la carpeta:', fs.uniqueName(dir, 'Nueva carpeta'));
@@ -55,7 +56,8 @@ export async function importFiles(dir, files) {
     const target = () => fs.join(dir, fs.uniqueName(dir, file.name));
     const note = toast(storage.enabled() ? `Subiendo "${file.name}" a B2…` : `Importando "${file.name}"…`);
     try {
-      if (storage.enabled()) fs.writeRemote(target(), await storage.upload(file));
+      const pct = (p) => note.update(`Subiendo "${file.name}" a B2… ${Math.floor(p * 100)}%`);
+      if (storage.enabled()) fs.writeRemote(target(), await storage.upload(file, file.name, pct));
       else fs.writeFile(target(), await readLocal(file));
       note.done(storage.enabled() ? `"${file.name}" guardado en B2` : `"${file.name}" importado`);
     } catch (e) {
@@ -98,6 +100,7 @@ export function entryMenu(e, path) {
     { label: 'Duplicar', action: () => duplicateEntry(path) },
   ];
   if (!fs.isDir(path)) items.push({ label: 'Descargar', action: () => download(path) });
+  if (!fs.isDir(path) && !path.startsWith(fs.TRASH + '/') && storage.enabled()) items.push({ label: 'Compartir enlace…', action: () => shareFile(path) });
   items.push('sep', { label: path.startsWith(fs.TRASH + '/') ? 'Eliminar para siempre' : 'Eliminar', action: () => deleteEntry(path) });
   contextMenu(e.clientX, e.clientY, items);
 }

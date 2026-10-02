@@ -10,6 +10,9 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 - **Gestor de ventanas**: mover, redimensionar, minimizar, maximizar (doble clic en la barra de título) y enfocar.
 - **Sistema de archivos virtual** (carpetas, archivos, renombrar, duplicar, eliminar, mover) **guardado en el servidor**: lo ves igual desde cualquier navegador. Ver [Sincronización](#sincronización-de-carpetas).
 - **Papelera**: *Eliminar* (o arrastrar al icono 🗑️, o `rm` en la Terminal) mueve a la papelera; los archivos de B2 no se borran hasta vaciarla, eliminarlos desde ahí o pasar 30 días. Combina bien con una regla de ciclo de vida en el bucket (p. ej. borrar versiones ocultas a los 30 días) como segunda red.
+- **Archivos de hasta 5 GB** (`MAX_UPLOAD_MB`, 5120 por defecto): los de más de 64 MB se suben por partes (subida multiparte de B2), de a 3 a la vez, con progreso y reintentos. PDF, vídeo y audio se abren en una pestaña; zip, rar, iso, docx… se descargan.
+- **Enlaces para compartir**: clic derecho en un archivo → *Compartir enlace…* crea `https://…/d/<token>` para que cualquiera lo descargue sin entrar, con caducidad (1 h a 30 días) y límite de descargas opcional. Se gestionan en Inicio → 🔗 Enlaces compartidos y se guardan en `data/enlaces.json`.
+- **Sin buscadores ni robots**: `robots.txt` lo prohíbe todo, todas las respuestas llevan `X-Robots-Tag: noindex` y los bots conocidos (buscadores, IA, SEO) reciben 403.
 - Subida de archivos desde tu ordenador (botón ⤒ o arrastrándolos al escritorio o al explorador) y descarga.
 - **Archivos subidos guardados en Backblaze B2** (llevan una nube ☁ en el icono). Se pueden abrir, editar, duplicar, descargar y borrar; los cambios se aplican también en B2.
 
