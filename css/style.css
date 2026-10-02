@@ -362,6 +362,9 @@ input, textarea, select {
   cursor: pointer;
 }
 .swatch.active { border-color: var(--accent); }
+.b2-form { display: grid; gap: 8px; }
+.b2-form button { justify-self: start; }
+.settings .muted { margin: 0 0 8px; color: var(--text-muted); font-size: 13px; }
 
 /* Navegador */
 .browser-frame { width: 100%; height: 100%; border: 0; background: #fff; }

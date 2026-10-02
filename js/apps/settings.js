@@ -1,6 +1,7 @@
 import * as fs from '../fs.js';
 import { createWindow } from '../wm.js';
-import { confirm } from '../ui.js';
+import { confirm, toast } from '../ui.js';
+import * as storage from '../storage.js';
 
 const SETTINGS_KEY = 'miputer.settings.v1';
 
@@ -36,7 +37,7 @@ export default {
   name: 'Ajustes',
   glyph: '⚙️',
   launch() {
-    const win = createWindow({ title: 'Ajustes', width: 480, height: 420 });
+    const win = createWindow({ title: 'Ajustes', width: 500, height: 640 });
     const s = loadSettings();
     win.body.innerHTML = `
       <div class="settings">
@@ -54,6 +55,17 @@ export default {
             <option value="light">Claro</option>
             <option value="dark">Oscuro</option>
           </select>
+        </section>
+        <section class="b2-config" hidden>
+          <h3>Backblaze B2 (dónde se guardan las subidas)</h3>
+          <p class="b2-state muted"></p>
+          <form class="b2-form">
+            <input name="keyId" placeholder="keyID" autocomplete="off" spellcheck="false" required>
+            <input name="appKey" type="password" placeholder="applicationKey" autocomplete="new-password" required>
+            <input name="bucket" placeholder="Nombre del bucket" autocomplete="off" spellcheck="false" required>
+            <input name="endpoint" placeholder="Endpoint (s3.us-east-005.backblazeb2.com)" autocomplete="off" spellcheck="false" required>
+            <button class="btn" type="submit">Probar y guardar</button>
+          </form>
         </section>
         <section>
           <h3>Sistema</h3>
@@ -82,6 +94,51 @@ export default {
     win.body.querySelector('.reset').onclick = async () => {
       if (await confirm('Restablecer', 'Se borrarán todos tus archivos y se restaurarán los de ejemplo. ¿Continuar?')) fs.reset();
     };
+    setupB2(win.body.querySelector('.b2-config'));
     return win;
   },
 };
+
+// Solo con el servidor de MiPuter (sin él, /api/b2-config no existe y la sección queda oculta).
+async function setupB2(section) {
+  const state = section.querySelector('.b2-state');
+  const form = section.querySelector('.b2-form');
+  const show = (cfg) => {
+    state.textContent = cfg.enabled
+      ? `Configurado: bucket "${cfg.bucket}" (clave ${cfg.keyId}). Rellena el formulario solo si quieres cambiarlo.`
+      : 'Sin configurar: las subidas se guardan solo en este navegador.';
+    if (cfg.endpoint && !form.endpoint.value) form.endpoint.value = cfg.endpoint.replace(/^https:\/\//, '');
+  };
+  try {
+    const res = await fetch('api/b2-config');
+    if (!res.ok) return;
+    show(await res.json());
+    section.hidden = false;
+  } catch {
+    return;
+  }
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const button = form.querySelector('button');
+    button.disabled = true;
+    button.textContent = 'Probando conexión…';
+    try {
+      const res = await fetch('api/b2-config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(Object.fromEntries(new FormData(form))),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+      form.appKey.value = '';
+      toast(`B2 configurado: bucket "${data.bucket}"`);
+      await storage.init();
+      show(await (await fetch('api/b2-config')).json());
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Probar y guardar';
+    }
+  };
+}

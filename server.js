@@ -20,16 +20,31 @@ const PORT = Number(process.env.PORT || 8000);
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 100) * 1024 * 1024;
 const PREFIX = (process.env.B2_PREFIX || 'miputer').replace(/^\/+|\/+$/g, '') + '/';
 
-const b2 = {
-  keyId: process.env.B2_KEY_ID,
-  appKey: process.env.B2_APPLICATION_KEY,
-  bucket: process.env.B2_BUCKET,
+// Credenciales de B2: las de .b2.json (guardadas desde Ajustes) mandan sobre las del .env.
+const B2_FILE = join(ROOT, '.b2.json');
+
+function makeB2Config({ keyId, appKey, bucket, endpoint, region }) {
+  const cfg = { keyId: String(keyId || '').trim(), appKey: String(appKey || '').trim(), bucket: String(bucket || '').trim() };
   // p. ej. https://s3.us-west-004.backblazeb2.com
-  endpoint: (process.env.B2_ENDPOINT || '').replace(/\/+$/, ''),
-};
-b2.enabled = Boolean(b2.keyId && b2.appKey && b2.bucket && b2.endpoint);
-if (b2.enabled && !/^https?:\/\//.test(b2.endpoint)) b2.endpoint = `https://${b2.endpoint}`;
-b2.region = process.env.B2_REGION || b2.endpoint.match(/s3\.([a-z0-9-]+)\.backblazeb2\.com/)?.[1] || 'us-east-1';
+  cfg.endpoint = String(endpoint || '').trim().replace(/\/+$/, '');
+  if (cfg.endpoint && !/^https?:\/\//.test(cfg.endpoint)) cfg.endpoint = `https://${cfg.endpoint}`;
+  cfg.enabled = Boolean(cfg.keyId && cfg.appKey && cfg.bucket && cfg.endpoint);
+  cfg.region = region || cfg.endpoint.match(/s3\.([a-z0-9-]+)\.backblazeb2\.com/)?.[1] || 'us-east-1';
+  return cfg;
+}
+
+const b2 = makeB2Config(
+  existsSync(B2_FILE)
+    ? JSON.parse(readFileSync(B2_FILE, 'utf8'))
+    : {
+        keyId: process.env.B2_KEY_ID,
+        appKey: process.env.B2_APPLICATION_KEY,
+        bucket: process.env.B2_BUCKET,
+        endpoint: process.env.B2_ENDPOINT,
+        region: process.env.B2_REGION,
+      },
+);
+b2.source = existsSync(B2_FILE) ? 'ajustes' : '.env';
 
 // ---------------------------------------------------------------------------
 // Contraseña de acceso
@@ -256,27 +271,28 @@ export function signRequest({ method, url, headers = {}, payloadHash, accessKey,
   };
 }
 
-function objectUrl(key) {
-  return `${b2.endpoint}/${encodeRfc3986(b2.bucket)}/${key.split('/').map(encodeRfc3986).join('/')}`;
+function objectUrl(key, cfg = b2) {
+  return `${cfg.endpoint}/${encodeRfc3986(cfg.bucket)}/${key.split('/').map(encodeRfc3986).join('/')}`;
 }
 
-async function b2Request(method, key, { body, headers = {} } = {}) {
-  const url = objectUrl(key);
+async function b2Request(method, key, { body, headers = {} } = {}, cfg = b2) {
+  const url = objectUrl(key, cfg);
   const payload = body ?? Buffer.alloc(0);
   const signed = signRequest({
     method,
     url,
     headers,
     payloadHash: sha256(payload),
-    accessKey: b2.keyId,
-    secretKey: b2.appKey,
-    region: b2.region,
+    accessKey: cfg.keyId,
+    secretKey: cfg.appKey,
+    region: cfg.region,
   });
   delete signed.host; // fetch la pone sola
   const res = await fetch(url, { method, headers: signed, body: method === 'GET' || method === 'HEAD' ? undefined : payload });
   if (!res.ok && !(method === 'DELETE' && res.status === 404)) {
     const text = await res.text().catch(() => '');
-    const msg = text.match(/<Message>([^<]*)<\/Message>/)?.[1] || text.slice(0, 200) || res.statusText;
+    const xml = (t) => t.replace(/&(apos|quot|lt|gt|amp);/g, (_, e) => ({ apos: "'", quot: '"', lt: '<', gt: '>', amp: '&' })[e]);
+    const msg = xml(text.match(/<Message>([^<]*)<\/Message>/)?.[1] || '') || text.slice(0, 200) || res.statusText;
     throw Object.assign(new Error(`B2 ${res.status}: ${msg}`), { status: res.status === 404 ? 404 : 502 });
   }
   return res;
@@ -427,6 +443,57 @@ async function handleClaudeApi(req, res, url) {
 }
 
 // ---------------------------------------------------------------------------
+// Configurar B2 desde Ajustes
+// ---------------------------------------------------------------------------
+//
+// Las claves llegan del navegador, se prueban subiendo y borrando un objeto, y solo
+// si funcionan se guardan en .b2.json (600). La applicationKey nunca vuelve al navegador.
+
+async function handleB2Config(req, res) {
+  if (req.method === 'GET') {
+    return sendJson(res, 200, {
+      enabled: b2.enabled,
+      source: b2.source,
+      bucket: b2.bucket || '',
+      endpoint: b2.endpoint || '',
+      keyId: b2.keyId ? `${b2.keyId.slice(0, 6)}…` : '',
+    });
+  }
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Método no permitido' });
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  let input;
+  try {
+    input = JSON.parse((await readBody(req, 8192)).toString());
+  } catch {
+    return sendJson(res, 400, { error: 'Datos no válidos' });
+  }
+  const cfg = makeB2Config(input);
+  if (!cfg.enabled) return sendJson(res, 400, { error: 'Rellena los cuatro campos' });
+  // Solo endpoints de Backblaze: el servidor no debe hacer peticiones a cualquier URL.
+  if (!/^https:\/\/s3\.[a-z0-9-]+\.backblazeb2\.com$/.test(cfg.endpoint)) {
+    return sendJson(res, 400, { error: 'El endpoint tiene que ser del tipo s3.<región>.backblazeb2.com' });
+  }
+  if (!/^[A-Za-z0-9-]{6,63}$/.test(cfg.bucket)) return sendJson(res, 400, { error: 'Nombre de bucket no válido' });
+
+  const testKey = `${PREFIX}.prueba-de-conexion`;
+  try {
+    await b2Request('PUT', testKey, { body: Buffer.from('ok'), headers: { 'content-type': 'text/plain' } }, cfg);
+    await (await b2Request('GET', testKey, {}, cfg)).arrayBuffer();
+    await b2Request('DELETE', testKey, {}, cfg);
+  } catch (e) {
+    return sendJson(res, 400, { error: `No se pudo usar el bucket con esas claves (${e.message})` });
+  }
+
+  const { keyId, appKey, bucket, endpoint, region } = cfg;
+  const tmp = `${B2_FILE}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ keyId, appKey, bucket, endpoint, region }), { mode: 0o600 });
+  renameSync(tmp, B2_FILE);
+  Object.assign(b2, cfg, { source: 'ajustes' });
+  console.log(`Subidas → Backblaze B2 (bucket "${b2.bucket}", región ${b2.region}) — configurado desde Ajustes`);
+  return sendJson(res, 200, { ok: true, bucket: b2.bucket });
+}
+
+// ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
 
@@ -471,6 +538,7 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { auth: auth.enabled, b2: b2.enabled, bucket: b2.enabled ? b2.bucket : null, maxUploadMb: MAX_UPLOAD_BYTES / 1024 / 1024 });
   }
   if (route.startsWith('/api/claude') && (await handleClaudeApi(req, res, url)) !== false) return;
+  if (route === '/api/b2-config') return handleB2Config(req, res);
   if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
 
   // Subir un archivo nuevo: POST /api/files?name=foto.png  (cuerpo = bytes)

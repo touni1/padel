@@ -65,6 +65,8 @@ Si lo publicas en internet, sírvelo siempre con **HTTPS**, porque si no la cont
    B2_ENDPOINT=https://s3.us-west-004.backblazeb2.com
    ```
 
+   **O desde la propia web:** en **Ajustes → Backblaze B2** rellenas los cuatro datos y pulsas *Probar y guardar*. El servidor sube y borra un archivo de prueba y, solo si funciona, guarda las claves en `.b2.json` (600), que tiene prioridad sobre el `.env`. La applicationKey no vuelve nunca al navegador.
+
 5. Arranca con `npm start`. En la consola debe aparecer `Subidas → Backblaze B2 (bucket "…")`. En la Terminal de MiPuter, el comando `b2` también te dice dónde se guardan las subidas.
 
 **Cómo funciona:** el navegador nunca ve tus claves. Las subidas van a `server.js`, que las firma (AWS Signature V4, la API compatible con S3 de B2) y las guarda en el bucket bajo `miputer/<id>-<nombre>`. Al abrir un archivo, el servidor lo lee de B2 y se lo pasa al navegador, así que no hace falta configurar CORS en el bucket. El árbol de carpetas sigue guardándose en el navegador (`localStorage`) y apunta a esos objetos.

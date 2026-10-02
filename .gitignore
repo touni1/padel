@@ -2,3 +2,5 @@
 node_modules/
 .password.json
 .password.json.tmp
+.b2.json
+.b2.json.tmp
