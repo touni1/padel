@@ -44,7 +44,7 @@ export function openPath(path) {
   return apps.get('editor').launch({ path });
 }
 
-const OPEN_IN_TAB = ['pdf', 'mp4', 'webm', 'mov', 'mp3', 'wav', 'ogg', 'm4a'];
+const OPEN_IN_TAB = ['mp4', 'webm', 'mov', 'mp3', 'wav', 'ogg', 'm4a'];
 
 export function glyphFor(entry) {
   if (entry.type === 'dir') return '📁';

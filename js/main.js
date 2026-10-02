@@ -15,10 +15,11 @@ import viewer from './apps/viewer.js';
 import settings from './apps/settings.js';
 import trash from './apps/trash.js';
 import shares from './apps/shares.js';
+import pdf from './apps/pdf.js';
 
 const DESKTOP_DIR = '/Escritorio';
 
-[files, editor, terminal, claude, calculator, browser, viewer, settings, shares, trash].forEach(register);
+[files, editor, terminal, claude, calculator, browser, viewer, pdf, settings, shares, trash].forEach(register);
 
 function appIcon(app) {
   const el = document.createElement('div');
