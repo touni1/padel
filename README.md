@@ -19,6 +19,7 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 | 🗂️ Archivos | Explorador con navegación, ruta editable, historial y arrastrar a carpetas |
 | 📝 Editor de texto | Abre/guarda `.txt`, `.md`, `.js`… (`Ctrl+S`), avisa de cambios sin guardar |
 | 💻 Terminal | `ls`, `cd`, `cat`, `echo > archivo`, `mkdir`, `rm`, `mv`, `cp`, `open`, `neofetch`… |
+| ✳️ Claude | Terminal **real** del servidor con [Claude Code](https://claude.com/claude-code) (ver [App Claude](#app-claude)) |
 | 🧮 Calculadora | Con paréntesis y soporte de teclado (sin `eval`) |
 | 🌐 Navegador | Navega URLs en un iframe o muestra archivos `.html` del sistema virtual |
 | 🖼️ Visor de imágenes | Abre imágenes subidas |
@@ -26,10 +27,11 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 
 ## Cómo ejecutarlo
 
-Necesitas Node.js 20.12 o superior (no hay dependencias que instalar).
+Necesitas Node.js 20.12 o superior. Las dependencias (`node-pty` y `ws`) solo hacen falta para la app Claude; sin ellas el resto funciona igual.
 
 ```bash
 cp .env.example .env   # y rellénalo con tu contraseña y tus datos de B2
+npm install            # opcional: solo para la app Claude
 npm start
 # abre http://localhost:8000
 ```
@@ -67,8 +69,9 @@ Si `.env` no está configurado (o sirves la carpeta con un servidor estático, c
 ## Estructura
 
 ```
-server.js         servidor Node: inicio de sesión, web estática y API de archivos en B2
-.env.example      plantilla de configuración de B2
+server.js         servidor Node: inicio de sesión, web estática, API de archivos en B2 y WebSocket de Claude
+.env.example      plantilla de configuración
+deploy/           servicios systemd, tmux, nginx y update.sh (ver "Despliegue")
 index.html
 css/style.css
 js/
@@ -103,3 +106,87 @@ export default {
 ```
 
 y regístrala en `js/main.js` añadiéndola a la lista de `register`.
+
+## App Claude
+
+La app **✳️ Claude** abre una terminal real del servidor (con [xterm.js](https://xtermjs.org)) en la que corre Claude Code, para pedirle cosas como en Claude Code Desktop.
+
+**Cómo funciona**
+
+```
+navegador ──wss /api/pty──▶ server.js (usuario miputer)
+                              └─ node-pty: cliente tmux ──socket──▶ tmux (usuario mpclaude) ──▶ claude
+```
+
+- `server.js` nunca ejecuta `claude` él mismo: lanza un *cliente* de tmux que se conecta al servidor tmux del servicio `miputer-claude`, que corre como `mpclaude`, un usuario sin sudo y con su carpeta de trabajo propia (`/home/mpclaude/trabajo`).
+- Hay hasta `CLAUDE_MAX_SESSIONS` (3) sesiones, y como mucho esas mismas ventanas conectadas a la vez.
+- **Cerrar la ventana o perder la conexión** mata el cliente, pero Claude sigue en segundo plano y se puede **retomar** desde la lista de sesiones. **Terminar sesión** cierra Claude de verdad. Las sesiones que pasan `CLAUDE_IDLE_HOURS` (24 h) sin nadie conectado se cierran solas.
+- Si sales de Claude te queda un shell de `mpclaude`; escribe `claude` (o `claude --continue`) para volver.
+
+**Seguridad**
+
+- El WebSocket solo se acepta con la cookie de sesión válida (`isAuthenticated`) y con la cabecera `Origin` del propio sitio (o una de `ALLOWED_ORIGINS`). Sin `MIPUTER_PASSWORD` la app no se activa nunca.
+- `mpclaude` no tiene sudo, y su servicio usa `NoNewPrivileges`, sistema de archivos de solo lectura salvo su carpeta, `/tmp` privado y no ve `/home/miputer`, `/home/ubuntu`, `/home/jaz`, `/var/www`, `/etc/nginx` ni `/etc/letsencrypt`. Tampoco puede leer el `.env` de MiPuter.
+- La configuración de tmux (`/etc/miputer-claude/tmux.conf`) es de root, así que Claude no puede cambiar quién se conecta a sus sesiones.
+- xterm.js se carga desde jsDelivr con hash de integridad (SRI).
+
+> ⚠️ **Riesgos.** Quien entre en MiPuter tiene un shell en el servidor como `mpclaude`, y Claude puede ejecutar comandos ahí. La contraseña de MiPuter pasa a proteger también eso, así que usa una larga y única. `mpclaude` tiene salida a internet y puede leer lo que sea legible para cualquier usuario del sistema. Además, la cuenta de Claude con la que inicies sesión queda guardada en `/home/mpclaude/.claude`.
+
+**Activarla:** instala las dependencias (`npm ci`) y define en `.env` `CLAUDE_TMUX_SOCKET` y `CLAUDE_WORKDIR` (ver `.env.example`). El resto está en el apartado siguiente.
+
+## Despliegue
+
+Así está desplegado en un VPS Ubuntu 24.04 que ya tenía nginx y otras apps.
+
+| Pieza | Dónde |
+| --- | --- |
+| Código | `/home/miputer/miputer` (rama `claude/nuevo-proyecto-puter-skm4dr`), usuario de sistema `miputer` sin shell ni sudo |
+| Configuración | `/home/miputer/miputer/.env` (600, de `miputer`) con `PORT=8000`, `HOST=127.0.0.1`, `TRUST_PROXY=true`, `COOKIE_SECURE=true` y las variables `CLAUDE_*` |
+| Node.js | el del sistema (24 LTS) |
+| Servicio web | `miputer.service` ([deploy/miputer.service](deploy/miputer.service)): `Restart=always`, arranca con el sistema, `NoNewPrivileges`, `ProtectSystem=strict` + `ReadWritePaths=/home/miputer`, `PrivateTmp` |
+| Servicio Claude | `miputer-claude.service` ([deploy/miputer-claude.service](deploy/miputer-claude.service)): servidor tmux como `mpclaude`, con [deploy/tmux.conf](deploy/tmux.conf) en `/etc/miputer-claude/` |
+| Proxy + HTTPS | nginx ([deploy/nginx-miputer.conf](deploy/nginx-miputer.conf)) → `127.0.0.1:8000`, con WebSocket. Certificado de Let's Encrypt con `certbot --nginx`, que se renueva solo |
+| Firewall | ufw: SSH, 80 y 443 (más los puertos de otras apps que ya había). El 8000 solo escucha en `127.0.0.1` |
+
+**Editar la configuración** (contraseña y claves de B2):
+
+```bash
+sudo -u miputer nano /home/miputer/miputer/.env
+sudo systemctl restart miputer
+```
+
+**Actualizar** a la última versión de la rama (hace `git pull`, `npm ci` si cambiaron las dependencias, reinstala los servicios si cambiaron y reinicia):
+
+```bash
+sudo bash /home/miputer/miputer/deploy/update.sh
+```
+
+**Iniciar sesión en Claude** (una sola vez): abre la app Claude en MiPuter y sigue los pasos de Claude Code (copia el enlace en tu navegador e inicia sesión, y pega el código que te dé). También se puede hacer por SSH con `sudo -u mpclaude -i claude`.
+
+**Logs y estado:**
+
+```bash
+journalctl -u miputer -f
+systemctl status miputer miputer-claude
+sudo -u miputer tmux -S /run/miputer-claude/tmux.sock ls   # sesiones de Claude abiertas
+```
+
+**Instalación desde cero** (resumen de lo que se hizo):
+
+```bash
+sudo apt install -y build-essential tmux nginx certbot python3-certbot-nginx   # build-essential: compilar node-pty
+sudo useradd --system --create-home --shell /usr/sbin/nologin miputer
+sudo useradd --create-home --shell /bin/bash mpclaude && sudo passwd -l mpclaude
+sudo chmod 750 /home/miputer && sudo chmod 700 /home/mpclaude
+sudo usermod -aG mpclaude miputer                     # para poder abrir el socket de tmux
+sudo -u miputer git clone -b claude/nuevo-proyecto-puter-skm4dr https://github.com/touni1/padel.git /home/miputer/miputer
+cd /home/miputer/miputer && sudo -u miputer -H npm ci --omit=dev
+sudo -u miputer sh -c 'umask 077; cp .env.example .env'   # y editarlo
+sudo -u mpclaude -i sh -c 'mkdir -p ~/trabajo && curl -fsSL https://claude.ai/install.sh | bash'
+sudo install -d /etc/miputer-claude && sudo install -m 644 deploy/tmux.conf /etc/miputer-claude/
+sudo install -m 644 deploy/miputer.service deploy/miputer-claude.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now miputer-claude miputer
+sudo install -m 644 deploy/nginx-miputer.conf /etc/nginx/sites-available/miputer
+sudo ln -s /etc/nginx/sites-available/miputer /etc/nginx/sites-enabled/ && sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d miputer.cloudar.co --redirect
+```

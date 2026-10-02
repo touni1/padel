@@ -8,6 +8,7 @@ import { applySettings } from './apps/settings.js';
 import files from './apps/files.js';
 import editor from './apps/editor.js';
 import terminal from './apps/terminal.js';
+import claude from './apps/claude.js';
 import calculator from './apps/calculator.js';
 import browser from './apps/browser.js';
 import viewer from './apps/viewer.js';
@@ -15,7 +16,7 @@ import settings from './apps/settings.js';
 
 const DESKTOP_DIR = '/Escritorio';
 
-[files, editor, terminal, calculator, browser, viewer, settings].forEach(register);
+[files, editor, terminal, claude, calculator, browser, viewer, settings].forEach(register);
 
 function appIcon(app) {
   const el = document.createElement('div');

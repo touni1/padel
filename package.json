@@ -1,11 +1,17 @@
 {
   "name": "miputer",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "Escritorio web al estilo puter.com con subidas a Backblaze B2",
+  "description": "Escritorio web al estilo puter.com con subidas a Backblaze B2 y app de Claude Code",
   "type": "module",
-  "engines": { "node": ">=20.12" },
+  "engines": {
+    "node": ">=20.12"
+  },
   "scripts": {
     "start": "node server.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "ws": "^8.22.0"
   }
 }

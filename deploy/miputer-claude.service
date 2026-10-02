@@ -1,0 +1,44 @@
+# Servidor tmux donde corre Claude Code para la app Claude de MiPuter.
+# Se instala en /etc/systemd/system/miputer-claude.service
+#
+# Corre como "mpclaude", un usuario sin sudo. MiPuter solo se conecta a este tmux
+# como cliente (el usuario miputer está en el grupo mpclaude para poder abrir el
+# socket), así que todo lo que se ejecuta en la terminal lo hace mpclaude.
+[Unit]
+Description=Sesiones de Claude Code para MiPuter (tmux)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=forking
+User=mpclaude
+Group=mpclaude
+RuntimeDirectory=miputer-claude
+RuntimeDirectoryMode=0750
+WorkingDirectory=/home/mpclaude/trabajo
+Environment=HOME=/home/mpclaude
+Environment=PATH=/home/mpclaude/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LANG=C.UTF-8
+Environment=COLORTERM=truecolor
+ExecStart=/usr/bin/tmux -S /run/miputer-claude/tmux.sock -f /etc/miputer-claude/tmux.conf new-session -d -s _ancla "sleep infinity"
+# tmux crea el socket con permisos 0600; el grupo (miputer está en mpclaude) necesita poder abrirlo.
+ExecStartPost=/bin/chmod 660 /run/miputer-claude/tmux.sock
+ExecStop=/usr/bin/tmux -S /run/miputer-claude/tmux.sock kill-server
+Restart=on-failure
+RestartSec=5
+
+# Claude solo puede escribir en su carpeta; no ve las otras apps del servidor.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/mpclaude
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+InaccessiblePaths=-/home/miputer -/home/ubuntu -/home/jaz -/root -/var/www -/etc/letsencrypt -/etc/nginx
+
+[Install]
+WantedBy=multi-user.target

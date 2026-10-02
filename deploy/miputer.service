@@ -1,0 +1,33 @@
+# Servicio de MiPuter. Se instala en /etc/systemd/system/miputer.service
+[Unit]
+Description=MiPuter (escritorio web)
+Wants=network-online.target
+After=network-online.target miputer-claude.service
+
+[Service]
+Type=simple
+User=miputer
+Group=miputer
+WorkingDirectory=/home/miputer/miputer
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+
+# Endurecimiento: sin escalar privilegios, sistema de archivos de solo lectura
+# salvo su carpeta, /tmp privado y sin acceso al kernel.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/miputer
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

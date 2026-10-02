@@ -1,11 +1,13 @@
 // Servidor de MiPuter: sirve la web estática y guarda los archivos subidos en
-// Backblaze B2 a través de su API compatible con S3. Sin dependencias (Node 20+).
+// Backblaze B2 a través de su API compatible con S3 (Node 20+). Las únicas
+// dependencias (node-pty y ws) son para la app Claude y son opcionales.
 //
 // Las credenciales de B2 se leen de variables de entorno (o de un archivo .env)
 // y nunca se envían al navegador.
 
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { existsSync, createReadStream, statSync } from 'node:fs';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -204,6 +206,149 @@ async function b2Request(method, key, { body, headers = {} } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// App Claude: terminal real por WebSocket (/api/pty)
+// ---------------------------------------------------------------------------
+//
+// Este servidor nunca ejecuta `claude` por sí mismo: node-pty lanza un *cliente*
+// de tmux que se conecta al servidor tmux de un usuario sin privilegios (el
+// servicio miputer-claude), y es ese servidor el que corre Claude Code. Cerrar la
+// ventana o perder la conexión mata el cliente; la sesión sigue viva para poder
+// retomarla hasta que se termina a mano o pasa CLAUDE_IDLE_HOURS sin nadie conectado.
+
+const CLAUDE_SOCKET = process.env.CLAUDE_TMUX_SOCKET || '';
+const CLAUDE_WORKDIR = process.env.CLAUDE_WORKDIR || '';
+const CLAUDE_MAX = Math.max(1, Number(process.env.CLAUDE_MAX_SESSIONS || 3));
+const CLAUDE_IDLE_MS = Number(process.env.CLAUDE_IDLE_HOURS || 24) * 3600_000;
+// Shell de login: tmux pasa el PATH del cliente (este servidor), no el del usuario de Claude.
+const CLAUDE_CMD = `exec bash -lc 'claude; echo; echo "Claude se ha cerrado. Escribe claude para volver a abrirlo."; exec bash -l'`;
+const ptyClients = new Set();
+
+let pty = null;
+let WebSocketServer = null;
+if (CLAUDE_SOCKET) {
+  try {
+    pty = (await import('node-pty')).default;
+    ({ WebSocketServer } = await import('ws'));
+  } catch (e) {
+    console.error(`App Claude desactivada (¿falta npm install?): ${e.message}`);
+  }
+}
+// Sin contraseña no se ofrece nunca una terminal: cualquiera podría abrirla.
+const claudeEnabled = () => Boolean(PASSWORD && CLAUDE_SOCKET && pty && WebSocketServer);
+
+function tmux(...args) {
+  return new Promise((resolve) => {
+    execFile('tmux', ['-S', CLAUDE_SOCKET, ...args], { timeout: 5000 }, (err, stdout) => resolve(err ? '' : stdout));
+  });
+}
+
+async function claudeSessions() {
+  const out = await tmux('list-sessions', '-F', '#{session_name} #{session_attached} #{session_activity}');
+  return out
+    .split('\n')
+    .map((line) => line.split(' '))
+    .filter(([name]) => /^mp-\d+$/.test(name))
+    .map(([name, attached, activity]) => ({ slot: Number(name.slice(3)), attached: Number(attached), activity: Number(activity) * 1000 }));
+}
+
+// Evita el secuestro de WebSocket entre sitios: el navegador siempre envía Origin.
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  const proto = (process.env.TRUST_PROXY === 'true' && req.headers['x-forwarded-proto']?.split(',')[0].trim()) || 'http';
+  const extra = (process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return origin === `${proto}://${req.headers.host}` || extra.includes(origin);
+}
+
+const clamp = (n, min, max) => Math.min(max, Math.max(min, Math.floor(Number(n)) || min));
+
+function attachClaude(ws, slot, cols, rows) {
+  const args = ['-u', '-S', CLAUDE_SOCKET, 'new-session', '-A', '-s', `mp-${slot}`];
+  if (CLAUDE_WORKDIR) args.push('-c', CLAUDE_WORKDIR);
+  args.push(CLAUDE_CMD);
+  const term = pty.spawn('tmux', args, {
+    name: 'xterm-256color',
+    cols,
+    rows,
+    cwd: '/',
+    env: { TERM: 'xterm-256color', LANG: 'C.UTF-8', PATH: process.env.PATH },
+  });
+  let alive = true;
+  const ping = setInterval(() => {
+    if (!alive) return ws.terminate();
+    alive = false;
+    ws.ping();
+  }, 30_000);
+
+  term.onData((data) => ws.readyState === ws.OPEN && ws.send(data));
+  term.onExit(() => ws.close(1000));
+  ws.on('pong', () => (alive = true));
+  ws.on('message', (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (msg.t === 'i' && typeof msg.d === 'string') term.write(msg.d);
+    else if (msg.t === 'r') term.resize(clamp(msg.c, 2, 500), clamp(msg.r, 2, 200));
+  });
+  ws.on('close', () => {
+    clearInterval(ping);
+    ptyClients.delete(ws);
+    try {
+      term.kill();
+    } catch {}
+  });
+}
+
+function handleUpgrade(req, socket, head) {
+  const reject = (status) => socket.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\nConnection: close\r\n\r\n`);
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname !== '/api/pty' || !claudeEnabled()) return reject(404);
+  if (!isAuthenticated(req)) return reject(401);
+  if (!sameOrigin(req)) return reject(403);
+  const slot = Number(url.searchParams.get('slot'));
+  if (!Number.isInteger(slot) || slot < 1 || slot > CLAUDE_MAX) return reject(400);
+  if (ptyClients.size >= CLAUDE_MAX) return reject(429);
+  const placeholder = {};
+  ptyClients.add(placeholder);
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    ptyClients.delete(placeholder);
+    ptyClients.add(ws);
+    attachClaude(ws, slot, clamp(url.searchParams.get('cols'), 2, 500), clamp(url.searchParams.get('rows'), 2, 200));
+  });
+}
+
+const wss = claudeEnabled() ? new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 }) : null;
+
+// Cierra las sesiones que llevan CLAUDE_IDLE_HOURS sin nadie conectado.
+if (wss && CLAUDE_IDLE_MS > 0) {
+  setInterval(async () => {
+    for (const s of await claudeSessions()) {
+      if (!s.attached && Date.now() - s.activity > CLAUDE_IDLE_MS) await tmux('kill-session', '-t', `mp-${s.slot}`);
+    }
+  }, 10 * 60_000).unref();
+}
+
+async function handleClaudeApi(req, res, url) {
+  if (url.pathname === '/api/claude' && req.method === 'GET') {
+    if (!claudeEnabled()) return sendJson(res, 200, { enabled: false });
+    return sendJson(res, 200, { enabled: true, max: CLAUDE_MAX, sessions: await claudeSessions() });
+  }
+  // Termina una sesión (mata Claude): POST /api/claude/kill?slot=N
+  if (url.pathname === '/api/claude/kill' && req.method === 'POST') {
+    if (!claudeEnabled()) return sendJson(res, 404, { error: 'La app Claude no está activada' });
+    if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+    const slot = Number(url.searchParams.get('slot'));
+    if (!Number.isInteger(slot) || slot < 1 || slot > CLAUDE_MAX) return sendJson(res, 400, { error: 'Sesión no válida' });
+    await tmux('kill-session', '-t', `mp-${slot}`);
+    return sendJson(res, 200, { ok: true });
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
 
@@ -247,6 +392,7 @@ async function handleApi(req, res, url) {
   if (route === '/api/status' && method === 'GET') {
     return sendJson(res, 200, { auth: Boolean(PASSWORD), b2: b2.enabled, bucket: b2.enabled ? b2.bucket : null, maxUploadMb: MAX_UPLOAD_BYTES / 1024 / 1024 });
   }
+  if (route.startsWith('/api/claude') && (await handleClaudeApi(req, res, url)) !== false) return;
   if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
 
   // Subir un archivo nuevo: POST /api/files?name=foto.png  (cuerpo = bytes)
@@ -342,11 +488,14 @@ const server = http.createServer(async (req, res) => {
     else res.destroy();
   }
 });
+server.on('upgrade', handleUpgrade);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  server.listen(PORT, () => {
-    console.log(`MiPuter en http://localhost:${PORT}`);
+  // HOST=127.0.0.1 deja el puerto accesible solo desde la propia máquina (detrás de un proxy).
+  server.listen(PORT, process.env.HOST || undefined, () => {
+    console.log(`MiPuter en http://${process.env.HOST || 'localhost'}:${PORT}`);
     console.log(PASSWORD ? 'Acceso protegido con contraseña' : '⚠️  Sin contraseña: define MIPUTER_PASSWORD en .env para proteger el acceso');
     console.log(b2.enabled ? `Subidas → Backblaze B2 (bucket "${b2.bucket}", región ${b2.region})` : 'B2 no configurado: las subidas se guardan en el navegador');
+    if (CLAUDE_SOCKET) console.log(claudeEnabled() ? `App Claude activa (máx. ${CLAUDE_MAX} sesiones)` : 'App Claude desactivada');
   });
 }
