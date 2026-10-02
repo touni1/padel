@@ -1,6 +1,7 @@
 import * as fs from './fs.js';
 import { register, list, launch } from './registry.js';
-import { renderIcons, folderMenu, moveInto } from './fileActions.js';
+import * as storage from './storage.js';
+import { renderIcons, folderMenu, moveInto, importFiles } from './fileActions.js';
 import { hideContextMenu, reportError, escapeHtml } from './ui.js';
 import { applySettings } from './apps/settings.js';
 
@@ -75,12 +76,7 @@ function wireDesktop() {
     e.preventDefault();
     if (e.dataTransfer.files.length) {
       // Archivos arrastrados desde el ordenador real.
-      for (const file of e.dataTransfer.files) {
-        const reader = new FileReader();
-        const isText = file.type.startsWith('text/') || /\.(txt|md|json|js|css|html|csv|py|svg)$/i.test(file.name);
-        reader.onload = () => reportError(() => fs.writeFile(fs.join(DESKTOP_DIR, fs.uniqueName(DESKTOP_DIR, file.name)), reader.result));
-        isText ? reader.readAsText(file) : reader.readAsDataURL(file);
-      }
+      importFiles(DESKTOP_DIR, [...e.dataTransfer.files]);
     } else {
       moveInto(e, DESKTOP_DIR);
     }
@@ -102,6 +98,7 @@ function wireDesktop() {
 }
 
 applySettings();
+storage.init();
 renderDesktop();
 renderStartMenu();
 startClock();

@@ -80,3 +80,24 @@ export async function reportError(fn) {
     await alert('Error', e.message);
   }
 }
+
+// Aviso pequeño en la esquina. Devuelve { done(texto, error) } para cerrarlo.
+export function toast(text) {
+  let box = document.getElementById('toasts');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'toasts';
+    document.body.appendChild(box);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = text;
+  box.appendChild(el);
+  return {
+    done(finalText = text, error = false) {
+      el.textContent = finalText;
+      el.classList.toggle('error', error);
+      setTimeout(() => el.remove(), error ? 6000 : 2500);
+    },
+  };
+}

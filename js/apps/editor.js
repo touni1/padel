@@ -1,4 +1,5 @@
 import * as fs from '../fs.js';
+import * as storage from '../storage.js';
 import { createWindow } from '../wm.js';
 import { prompt, confirm, reportError } from '../ui.js';
 
@@ -29,28 +30,46 @@ export default {
       const name = current ? fs.basename(current) : 'Sin título';
       win.setTitle(`${dirty ? '● ' : ''}${name} — Editor`);
       const lines = area.value.split('\n').length;
-      status.textContent = `${current || 'Archivo nuevo'} · ${lines} líneas · ${area.value.length} caracteres`;
+      const where = current && fs.getRemote(current) ? ' · ☁ Backblaze B2' : '';
+      status.textContent = `${current || 'Archivo nuevo'} · ${lines} líneas · ${area.value.length} caracteres${where}`;
     };
 
     const save = async (as = false) => {
+      if (area.disabled) return false; // todavía cargando o la carga falló
       if (!current || as) {
         const suggested = current || '/Documentos/Sin título.txt';
         const target = await prompt('Guardar como', 'Ruta del archivo:', suggested);
         if (!target) return false;
         current = fs.normalize(target);
       }
-      await reportError(() => fs.writeFile(current, area.value));
+      const remote = !as && fs.getRemote(current);
+      const ok = await reportError(async () => {
+        if (remote) {
+          // Archivo de B2: se sobrescribe en Backblaze.
+          const { size } = await storage.writeText(remote.key, area.value, remote.type || 'text/plain; charset=utf-8');
+          fs.writeRemote(current, { ...remote, size });
+        } else {
+          fs.writeFile(current, area.value);
+        }
+        return true;
+      });
+      if (!ok) return false;
       dirty = false;
       refresh();
       return true;
     };
 
-    if (current) {
-      try {
-        area.value = fs.readFile(current);
-      } catch (e) {
-        area.value = '';
-      }
+    if (current && fs.exists(current)) {
+      area.disabled = true;
+      area.value = fs.getRemote(current) ? 'Cargando desde B2…' : '';
+      fs.readFileAsync(current)
+        .then((text) => (area.value = text))
+        .then(() => (area.disabled = false))
+        .catch((e) => (area.value = `No se pudo cargar: ${e.message}`))
+        .finally(() => {
+          refresh();
+          area.focus();
+        });
     }
 
     area.oninput = () => {

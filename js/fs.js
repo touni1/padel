@@ -1,6 +1,8 @@
 // Sistema de archivos virtual persistido en localStorage.
 // Nodo directorio: { type: 'dir', children: {}, mtime }
 // Nodo archivo:    { type: 'file', content: '', mtime }
+// Archivo en B2:   { type: 'file', content: '', remote: { key, size, type }, mtime }
+import * as storage from './storage.js';
 
 const STORAGE_KEY = 'miputer.fs.v1';
 const listeners = new Set();
@@ -89,6 +91,21 @@ export function extname(path) {
   return i > 0 ? name.slice(i + 1).toLowerCase() : '';
 }
 
+const sizeOf = (node) => (node.remote ? node.remote.size : node.content.length);
+
+// Todas las claves de B2 que cuelgan de un nodo (para borrarlas o copiarlas).
+function remoteNodes(node, out = []) {
+  if (node.type === 'file' && node.remote) out.push(node);
+  if (node.type === 'dir') Object.values(node.children).forEach((c) => remoteNodes(c, out));
+  return out;
+}
+
+function deleteRemote(node) {
+  for (const n of remoteNodes(node)) {
+    storage.remove(n.remote.key).catch((e) => console.error('No se pudo borrar de B2', n.remote.key, e));
+  }
+}
+
 function getNode(path) {
   const parts = normalize(path).split('/').filter(Boolean);
   let node = root;
@@ -124,7 +141,8 @@ export function stat(path) {
   return {
     type: node.type,
     mtime: node.mtime,
-    size: node.type === 'file' ? node.content.length : Object.keys(node.children).length,
+    size: node.type === 'file' ? sizeOf(node) : Object.keys(node.children).length,
+    remote: node.remote || null,
   };
 }
 
@@ -143,7 +161,8 @@ export function readdir(path) {
       path: join(path, name),
       type: child.type,
       mtime: child.mtime,
-      size: child.type === 'file' ? child.content.length : Object.keys(child.children).length,
+      size: child.type === 'file' ? sizeOf(child) : Object.keys(child.children).length,
+      remote: child.remote || null,
     }))
     .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
 }
@@ -152,7 +171,33 @@ export function readFile(path) {
   const node = getNode(path);
   if (!node) throw new Error(`No existe: ${path}`);
   if (node.type !== 'file') throw new Error(`Es un directorio: ${path}`);
+  if (node.remote) throw new Error(`Está en la nube, usa readFileAsync: ${path}`);
   return node.content;
+}
+
+// Lee un archivo local o guardado en B2 como texto.
+export async function readFileAsync(path) {
+  const node = getNode(path);
+  if (node?.type === 'file' && node.remote) return storage.readText(node.remote.key);
+  return readFile(path);
+}
+
+// Datos del archivo en B2, o null si es local.
+export function getRemote(path) {
+  const node = getNode(path);
+  return node?.type === 'file' ? node.remote || null : null;
+}
+
+// Registra en `path` un archivo ya subido a B2.
+export function writeRemote(path, remote) {
+  const { parent, name } = getParent(path);
+  validName(name);
+  const existing = parent.children[name];
+  if (existing && existing.type === 'dir') throw new Error(`Es un directorio: ${path}`);
+  if (existing?.remote && existing.remote.key !== remote.key) deleteRemote(existing);
+  parent.children[name] = { type: 'file', content: '', remote: { key: remote.key, size: remote.size, type: remote.type }, mtime: now() };
+  parent.mtime = now();
+  persist();
 }
 
 export function writeFile(path, content = '') {
@@ -160,6 +205,7 @@ export function writeFile(path, content = '') {
   validName(name);
   const existing = parent.children[name];
   if (existing && existing.type === 'dir') throw new Error(`Es un directorio: ${path}`);
+  if (existing?.remote) deleteRemote(existing);
   parent.children[name] = { type: 'file', content: String(content), mtime: now() };
   parent.mtime = now();
   persist();
@@ -177,6 +223,7 @@ export function mkdir(path) {
 export function rm(path) {
   const { parent, name } = getParent(path);
   if (!parent.children[name]) throw new Error(`No existe: ${path}`);
+  deleteRemote(parent.children[name]);
   delete parent.children[name];
   parent.mtime = now();
   persist();
@@ -204,8 +251,23 @@ export function copy(from, to) {
   const dst = getParent(to);
   validName(dst.name);
   if (dst.parent.children[dst.name]) throw new Error(`Ya existe: ${to}`);
-  dst.parent.children[dst.name] = JSON.parse(JSON.stringify(node));
+  const clone = JSON.parse(JSON.stringify(node));
+  dst.parent.children[dst.name] = clone;
   persist();
+  // Los archivos en B2 se duplican también en B2 para que cada copia sea independiente.
+  const copies = remoteNodes(clone).map(async (n) => {
+    const { key } = await storage.copy(n.remote.key);
+    n.remote = { ...n.remote, key };
+  });
+  return Promise.all(copies).then(
+    () => copies.length && persist(),
+    (e) => {
+      // Si falla, se deshace la copia para que no queden dos nodos con la misma clave.
+      if (dst.parent.children[dst.name] === clone) delete dst.parent.children[dst.name];
+      persist();
+      throw e;
+    }
+  );
 }
 
 // Devuelve un nombre libre en `dir` basado en `name` ("Nueva carpeta (2)").
@@ -221,6 +283,7 @@ export function uniqueName(dir, name) {
 }
 
 export function reset() {
+  deleteRemote(root);
   root = defaultTree();
   persist();
 }

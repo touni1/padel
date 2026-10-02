@@ -1,7 +1,8 @@
 // Acciones de archivos compartidas por el escritorio y el explorador.
 import * as fs from './fs.js';
 import { openPath, glyphFor } from './registry.js';
-import { prompt, confirm, contextMenu, reportError, escapeHtml } from './ui.js';
+import * as storage from './storage.js';
+import { prompt, confirm, alert, contextMenu, reportError, escapeHtml, toast } from './ui.js';
 
 export async function newFolder(dir) {
   const name = await prompt('Nueva carpeta', 'Nombre de la carpeta:', fs.uniqueName(dir, 'Nueva carpeta'));
@@ -31,27 +32,52 @@ export function duplicateEntry(path) {
   return reportError(() => fs.copy(path, fs.join(dir, fs.uniqueName(dir, fs.basename(path)))));
 }
 
-// Sube archivos del ordenador real al sistema de archivos virtual.
+function readLocal(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    storage.isTextType(file.type, file.name) ? reader.readAsText(file) : reader.readAsDataURL(file);
+  });
+}
+
+// Importa archivos del ordenador real a `dir`. Si el servidor tiene B2
+// configurado se suben a Backblaze; si no, se guardan en el navegador.
+export async function importFiles(dir, files) {
+  const errors = [];
+  for (const file of files) {
+    const target = () => fs.join(dir, fs.uniqueName(dir, file.name));
+    const note = toast(storage.enabled() ? `Subiendo "${file.name}" a B2…` : `Importando "${file.name}"…`);
+    try {
+      if (storage.enabled()) fs.writeRemote(target(), await storage.upload(file));
+      else fs.writeFile(target(), await readLocal(file));
+      note.done(storage.enabled() ? `"${file.name}" guardado en B2` : `"${file.name}" importado`);
+    } catch (e) {
+      note.done(`Error con "${file.name}"`, true);
+      errors.push(`${file.name}: ${e.message}`);
+    }
+  }
+  if (errors.length) await alert('Error al subir', errors.join('\n'));
+}
+
 export function uploadInto(dir) {
   const input = document.createElement('input');
   input.type = 'file';
   input.multiple = true;
-  input.onchange = () => {
-    for (const file of input.files) {
-      const reader = new FileReader();
-      const isText = file.type.startsWith('text/') || /\.(txt|md|json|js|css|html|csv|py)$/i.test(file.name);
-      reader.onload = () => reportError(() => fs.writeFile(fs.join(dir, fs.uniqueName(dir, file.name)), reader.result));
-      isText ? reader.readAsText(file) : reader.readAsDataURL(file);
-    }
-  };
+  input.onchange = () => importFiles(dir, [...input.files]);
   input.click();
 }
 
 // Descarga un archivo virtual al ordenador real.
 export function download(path) {
-  const content = fs.readFile(path);
   const a = document.createElement('a');
-  a.href = content.startsWith('data:') ? content : URL.createObjectURL(new Blob([content], { type: 'text/plain' }));
+  const remote = fs.getRemote(path);
+  if (remote) {
+    a.href = storage.url(remote.key, { download: fs.basename(path) });
+  } else {
+    const content = fs.readFile(path);
+    a.href = content.startsWith('data:') ? content : URL.createObjectURL(new Blob([content], { type: 'text/plain' }));
+  }
   a.download = fs.basename(path);
   a.click();
 }
@@ -89,6 +115,10 @@ export function renderIcons(container, dir, { onOpen = openPath } = {}) {
     el.draggable = true;
     el.dataset.path = entry.path;
     el.innerHTML = `<span class="glyph">${glyphFor(entry)}</span><span>${escapeHtml(entry.name)}</span>`;
+    if (entry.remote) {
+      el.classList.add('remote');
+      el.title = 'Guardado en Backblaze B2';
+    }
     el.onclick = () => {
       container.querySelectorAll('.icon.selected').forEach((i) => i.classList.remove('selected'));
       el.classList.add('selected');

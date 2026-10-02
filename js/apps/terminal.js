@@ -1,5 +1,6 @@
 import * as fs from '../fs.js';
 import { createWindow } from '../wm.js';
+import * as storage from '../storage.js';
 import { escapeHtml } from '../ui.js';
 import { openPath, launch, list as listApps } from '../registry.js';
 
@@ -25,6 +26,7 @@ const HELP = `Comandos disponibles:
   mv <origen> <dest>   Mueve o renombra
   cp <origen> <dest>   Copia
   open <ruta|app>      Abre un archivo, carpeta o aplicación
+  b2                   Muestra dónde se guardan las subidas
   apps                 Lista las aplicaciones
   date                 Fecha y hora actual
   whoami               Usuario actual
@@ -73,16 +75,23 @@ export default {
         if (!fs.isDir(target)) throw new Error(`cd: no es una carpeta: ${p}`);
         cwd = target;
       },
-      cat: ([p]) => {
+      cat: async ([p]) => {
         need(p, 'cat <archivo>');
-        print(escapeHtml(fs.readFile(resolve(p))));
+        const remote = fs.getRemote(resolve(p));
+        if (remote && !storage.isTextType(remote.type, p)) {
+          return print(escapeHtml(`(archivo binario en B2, ${remote.size} bytes)`));
+        }
+        print(escapeHtml(await fs.readFileAsync(resolve(p))));
       },
+      b2: () =>
+        print(escapeHtml(storage.enabled() ? `Subidas → Backblaze B2, bucket "${storage.bucket()}"` : 'B2 no configurado: las subidas se guardan en el navegador')),
       echo: (args) => {
         const i = args.findIndex((a) => a === '>' || a === '>>');
         if (i === -1) return print(escapeHtml(args.join(' ')));
         const text = args.slice(0, i).join(' ') + '\n';
         const target = resolve(args[i + 1]);
         need(args[i + 1], 'echo <texto> > <archivo>');
+        if (fs.getRemote(target)) throw new Error('echo: no se puede escribir con > en un archivo de B2; usa el Editor');
         const prev = args[i] === '>>' && fs.exists(target) ? fs.readFile(target) : '';
         fs.writeFile(target, prev + text);
       },
@@ -106,7 +115,7 @@ export default {
       cp: ([a, b]) => {
         need(a && b, 'cp <origen> <destino>');
         const dst = fs.isDir(resolve(b)) ? fs.join(resolve(b), fs.basename(a)) : resolve(b);
-        fs.copy(resolve(a), dst);
+        return fs.copy(resolve(a), dst);
       },
       open: ([p]) => {
         need(p, 'open <ruta|app>');
@@ -125,14 +134,14 @@ export default {
         ),
     };
 
-    const run = (line) => {
+    const run = async (line) => {
       print(`<span class="prompt">${escapeHtml(promptEl.textContent)}</span>${escapeHtml(line)}`);
       const [cmd, ...args] = tokenize(line);
       if (!cmd) return;
       const fn = commands[cmd];
       if (!fn) return print(`${escapeHtml(cmd)}: comando no encontrado. Escribe "help".`, 'err');
       try {
-        fn(args);
+        await fn(args);
       } catch (e) {
         print(escapeHtml(e.message), 'err');
       }
@@ -144,9 +153,13 @@ export default {
         if (line.trim()) history.push(line);
         hIndex = history.length;
         input.value = '';
-        run(line);
-        updatePrompt();
-        term.scrollTop = term.scrollHeight;
+        input.disabled = true;
+        run(line).finally(() => {
+          input.disabled = false;
+          input.focus();
+          updatePrompt();
+          term.scrollTop = term.scrollHeight;
+        });
       } else if (e.key === 'ArrowUp' && hIndex > 0) {
         input.value = history[--hIndex];
         e.preventDefault();

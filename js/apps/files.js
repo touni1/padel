@@ -1,6 +1,7 @@
 import * as fs from '../fs.js';
 import { createWindow } from '../wm.js';
-import { renderIcons, folderMenu, moveInto, newFolder, newFile, uploadInto } from '../fileActions.js';
+import * as storage from '../storage.js';
+import { renderIcons, folderMenu, moveInto, newFolder, newFile, uploadInto, importFiles } from '../fileActions.js';
 import { openPath } from '../registry.js';
 
 export default {
@@ -49,7 +50,7 @@ export default {
       });
       const n = grid.children.length;
       if (!n) grid.innerHTML = '<div class="files-empty">Carpeta vacía</div>';
-      status.textContent = `${n} elemento${n === 1 ? '' : 's'}`;
+      status.textContent = `${n} elemento${n === 1 ? '' : 's'} · Subidas: ${storage.enabled() ? `Backblaze B2 (${storage.bucket()})` : 'navegador'}`;
     };
 
     win.body.querySelector('.toolbar').onclick = (e) => {
@@ -65,7 +66,8 @@ export default {
     grid.ondragover = (e) => e.preventDefault();
     grid.ondrop = (e) => {
       e.preventDefault();
-      moveInto(e, cwd);
+      if (e.dataTransfer.files.length) importFiles(cwd, [...e.dataTransfer.files]);
+      else moveInto(e, cwd);
     };
 
     const unsubscribe = fs.onChange(render);

@@ -361,9 +361,47 @@ input, textarea, select {
 
 /* Diálogo */
 .dialog { padding: 16px; display: grid; gap: 12px; }
+.dialog > div:first-child { white-space: pre-wrap; }
 .dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 @media (max-width: 640px) {
   .window { left: 0 !important; top: 0 !important; width: 100% !important; height: 100% !important; border-radius: 0; }
   .resize-handle { display: none; }
 }
+
+/* Archivos guardados en Backblaze B2 */
+.icon.remote .glyph { position: relative; }
+.icon.remote .glyph::after {
+  content: '☁';
+  position: absolute;
+  right: -8px;
+  bottom: -4px;
+  font-size: 15px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+}
+
+/* Avisos */
+#toasts {
+  position: fixed;
+  right: 12px;
+  bottom: 56px;
+  display: grid;
+  gap: 6px;
+  z-index: 100003;
+}
+.toast {
+  max-width: 320px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--taskbar);
+  color: var(--taskbar-text);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+.toast.error { background: #b4232a; }

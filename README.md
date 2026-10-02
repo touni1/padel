@@ -9,7 +9,8 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 - **Escritorio** con iconos, menú contextual (clic derecho), arrastrar y soltar, y barra de tareas con reloj.
 - **Gestor de ventanas**: mover, redimensionar, minimizar, maximizar (doble clic en la barra de título) y enfocar.
 - **Sistema de archivos virtual** persistente en `localStorage` (carpetas, archivos, renombrar, duplicar, eliminar, mover).
-- Subida de archivos desde tu ordenador (botón ⤒ o arrastrándolos al escritorio) y descarga.
+- Subida de archivos desde tu ordenador (botón ⤒ o arrastrándolos al escritorio o al explorador) y descarga.
+- **Archivos subidos guardados en Backblaze B2** (llevan una nube ☁ en el icono). Se pueden abrir, editar, duplicar, descargar y borrar; los cambios se aplican también en B2.
 
 ### Aplicaciones
 
@@ -25,18 +26,43 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 
 ## Cómo ejecutarlo
 
-Los módulos ES necesitan servirse por HTTP (no funciona abriendo el archivo directamente):
+Necesitas Node.js 20.12 o superior (no hay dependencias que instalar).
 
 ```bash
-python3 -m http.server 8000
+cp .env.example .env   # y rellénalo con tus datos de B2
+npm start
 # abre http://localhost:8000
 ```
 
-También se puede publicar tal cual en GitHub Pages, Netlify, Vercel, etc.
+### Configurar Backblaze B2
+
+1. En el panel de Backblaze, crea un **bucket privado** (Buckets → Create a Bucket).
+2. Copia su **Endpoint** (por ejemplo `s3.us-west-004.backblazeb2.com`).
+3. En **Application Keys → Add a New Application Key**, crea una clave con acceso de lectura y escritura **solo a ese bucket**. Guarda el `keyID` y la `applicationKey` (esta última solo se muestra una vez).
+4. Pon los cuatro valores en `.env`:
+
+   ```env
+   B2_KEY_ID=...
+   B2_APPLICATION_KEY=...
+   B2_BUCKET=nombre-de-tu-bucket
+   B2_ENDPOINT=https://s3.us-west-004.backblazeb2.com
+   ```
+
+5. Arranca con `npm start`. En la consola debe aparecer `Subidas → Backblaze B2 (bucket "…")`. En la Terminal de MiPuter, el comando `b2` también te dice dónde se guardan las subidas.
+
+**Cómo funciona:** el navegador nunca ve tus claves. Las subidas van a `server.js`, que las firma (AWS Signature V4, la API compatible con S3 de B2) y las guarda en el bucket bajo `miputer/<id>-<nombre>`. Al abrir un archivo, el servidor lo lee de B2 y se lo pasa al navegador, así que no hace falta configurar CORS en el bucket. El árbol de carpetas sigue guardándose en el navegador (`localStorage`) y apunta a esos objetos.
+
+> ⚠️ El servidor no tiene usuarios ni contraseña: cualquiera que pueda abrir su dirección puede leer y borrar los archivos subidos. Úsalo en local o detrás de un acceso protegido si lo publicas en internet.
+
+### Sin B2
+
+Si `.env` no está configurado (o sirves la carpeta con un servidor estático, como `python3 -m http.server`), todo sigue funcionando y las subidas se guardan en el navegador como antes.
 
 ## Estructura
 
 ```
+server.js         servidor Node: web estática + API de archivos en B2
+.env.example      plantilla de configuración de B2
 index.html
 css/style.css
 js/
@@ -45,7 +71,8 @@ js/
   fs.js           sistema de archivos virtual (localStorage)
   registry.js     registro de apps y asociación por extensión
   fileActions.js  acciones de archivos compartidas (crear, renombrar, mover…)
-  ui.js           diálogos y menú contextual
+  storage.js      cliente de la API de archivos en B2
+  ui.js           diálogos, avisos y menú contextual
   apps/           una app por archivo
 ```
 

@@ -1,5 +1,6 @@
 import * as fs from '../fs.js';
 import { createWindow } from '../wm.js';
+import { escapeHtml } from '../ui.js';
 
 export default {
   id: 'browser',
@@ -21,11 +22,15 @@ export default {
     const frame = win.body.querySelector('iframe');
     const urlInput = win.body.querySelector('.url');
 
-    const go = (target) => {
+    const go = async (target) => {
       target = target.trim();
       if (fs.exists(target) && !fs.isDir(target)) {
         frame.removeAttribute('src');
-        frame.srcdoc = fs.readFile(target);
+        try {
+          frame.srcdoc = await fs.readFileAsync(target);
+        } catch (e) {
+          frame.srcdoc = `<p style="font-family:sans-serif">No se pudo abrir: ${escapeHtml(e.message)}</p>`;
+        }
         win.setTitle(`${fs.basename(target)} — Navegador`);
       } else {
         if (!/^https?:\/\//.test(target)) target = `https://${target}`;
