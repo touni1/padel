@@ -40,6 +40,15 @@ npm start
 
 Define `MIPUTER_PASSWORD` en `.env` y MiPuter pedirá esa contraseña antes de mostrar nada (la web, los archivos y la API quedan protegidos). La sesión dura 30 días (`SESSION_DAYS`), y se cierra desde **Inicio → Cerrar sesión**. Al cambiar la contraseña se cierran todas las sesiones abiertas. Tras 5 intentos fallidos seguidos, esa IP queda bloqueada 15 minutos.
 
+Se cambia desde **Inicio → Cambiar contraseña** (`/cambiar-clave`; mínimo 12 caracteres). La nueva se guarda como hash scrypt en `.password.json` (600), que **tiene prioridad sobre `MIPUTER_PASSWORD`**: para volver a la del `.env`, borra ese archivo y reinicia.
+
+Para dar a alguien una **contraseña temporal** que tenga que cambiar en su primer inicio de sesión (hasta entonces no puede usar nada, ni la API ni la terminal de Claude):
+
+```bash
+cd /home/miputer/miputer && sudo -u miputer node server.js --temp-password
+sudo systemctl restart miputer
+```
+
 Si lo publicas en internet, sírvelo siempre con **HTTPS**, porque si no la contraseña viaja sin cifrar. Detrás de un proxy (nginx, Caddy…) añade `TRUST_PROXY=true` para que el límite de intentos use la IP real.
 
 ### Configurar Backblaze B2

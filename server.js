@@ -8,7 +8,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, createReadStream, statSync } from 'node:fs';
+import { existsSync, createReadStream, statSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
@@ -35,21 +35,47 @@ b2.region = process.env.B2_REGION || b2.endpoint.match(/s3\.([a-z0-9-]+)\.backbl
 // Contraseña de acceso
 // ---------------------------------------------------------------------------
 //
-// Si MIPUTER_PASSWORD está definida, toda la web y la API piden iniciar sesión.
-// La sesión es una cookie firmada con HMAC (derivada de la contraseña), así que
+// Si hay contraseña, toda la web y la API piden iniciar sesión. La contraseña sale
+// de .password.json (hash scrypt, se crea al cambiarla desde la web o con
+// `node server.js --temp-password`) o, si ese archivo no existe, de MIPUTER_PASSWORD.
+// La sesión es una cookie firmada con HMAC derivada de la contraseña, así que
 // sobrevive a reinicios del servidor y cambiar la contraseña cierra todas las sesiones.
 
-const PASSWORD = process.env.MIPUTER_PASSWORD || '';
+const PASSWORD_FILE = join(ROOT, '.password.json');
+const MIN_PASSWORD = 12;
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
 const COOKIE = 'miputer_session';
-const sessionKey = crypto.createHash('sha256').update(`miputer-session:${PASSWORD}`).digest();
 const loginAttempts = new Map(); // ip -> { count, until }
+
+// { enabled, plain } desde .env, o { enabled, salt, hash, mustChange } desde .password.json
+let auth;
+let sessionKey;
+function loadAuth() {
+  if (existsSync(PASSWORD_FILE)) auth = { enabled: true, ...JSON.parse(readFileSync(PASSWORD_FILE, 'utf8')) };
+  else auth = { enabled: Boolean(process.env.MIPUTER_PASSWORD), plain: process.env.MIPUTER_PASSWORD || '' };
+  sessionKey = crypto.createHash('sha256').update(`miputer-session:${auth.plain ?? auth.hash}`).digest();
+}
+loadAuth();
+
+function savePassword(password, mustChange) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password, salt, 32).toString('base64');
+  const tmp = `${PASSWORD_FILE}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ salt: salt.toString('base64'), hash, mustChange }), { mode: 0o600 });
+  renameSync(tmp, PASSWORD_FILE);
+  loadAuth();
+}
 
 const safeEqual = (a, b) => {
   const ha = crypto.createHash('sha256').update(String(a)).digest();
   const hb = crypto.createHash('sha256').update(String(b)).digest();
   return crypto.timingSafeEqual(ha, hb);
 };
+
+function checkPassword(password) {
+  if (auth.plain !== undefined) return safeEqual(password, auth.plain);
+  return safeEqual(crypto.scryptSync(password, Buffer.from(auth.salt, 'base64'), 32).toString('base64'), auth.hash);
+}
 
 function makeSession() {
   const exp = Date.now() + SESSION_DAYS * 86400_000;
@@ -58,7 +84,7 @@ function makeSession() {
 }
 
 function isAuthenticated(req) {
-  if (!PASSWORD) return true;
+  if (!auth.enabled) return true;
   const cookie = (req.headers.cookie || '').split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`));
   const [exp, sig] = (cookie?.slice(COOKIE.length + 1) || '').split('.');
   if (!exp || !sig || Number(exp) < Date.now()) return false;
@@ -74,7 +100,7 @@ function clientIp(req) {
   return (process.env.TRUST_PROXY === 'true' && req.headers['x-forwarded-for']?.split(',')[0].trim()) || req.socket.remoteAddress;
 }
 
-function loginPage(error = '') {
+function formPage({ action, intro, fields, button, error = '' }) {
   return `<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MiPuter</title>
@@ -94,14 +120,48 @@ function loginPage(error = '') {
   .error { color: #b4232a; text-align: center; font-size: 14px; }
 </style></head>
 <body>
-  <form method="post" action="login">
+  <form method="post" action="${action}">
     <h1>◆ MiPuter</h1>
-    <p>Introduce la contraseña para entrar</p>
-    <input type="password" name="password" placeholder="Contraseña" autocomplete="current-password" autofocus required>
+    <p>${intro}</p>
+    ${fields}
     ${error ? `<div class="error">${error}</div>` : ''}
-    <button type="submit">Entrar</button>
+    <button type="submit">${button}</button>
   </form>
 </body></html>`;
+}
+
+const loginPage = (error) =>
+  formPage({
+    action: 'login',
+    intro: 'Introduce la contraseña para entrar',
+    fields: '<input type="password" name="password" placeholder="Contraseña" autocomplete="current-password" autofocus required>',
+    button: 'Entrar',
+    error,
+  });
+
+const changePage = (error) =>
+  formPage({
+    action: 'cambiar-clave',
+    intro: auth.mustChange
+      ? 'Estás usando una contraseña temporal. Elige una nueva para continuar.'
+      : 'Cambia tu contraseña. Se cerrarán las demás sesiones abiertas.',
+    fields: `<input type="password" name="current" placeholder="Contraseña actual" autocomplete="current-password" autofocus required>
+    <input type="password" name="password" placeholder="Nueva contraseña (mín. ${MIN_PASSWORD} caracteres)" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>
+    <input type="password" name="repeat" placeholder="Repite la nueva contraseña" autocomplete="new-password" minlength="${MIN_PASSWORD}" required>`,
+    button: 'Cambiar contraseña',
+    error,
+  });
+
+// Cuenta un intento fallido; tras 5 seguidos, bloqueo de 15 minutos para esa IP.
+async function failAttempt(ip) {
+  const count = (loginAttempts.get(ip)?.count || 0) + 1;
+  loginAttempts.set(ip, { count: count >= 5 ? 0 : count, until: count >= 5 ? Date.now() + 15 * 60000 : 0 });
+  await new Promise((r) => setTimeout(r, 500));
+}
+
+function blockedFor(ip) {
+  const entry = loginAttempts.get(ip);
+  return entry && entry.until > Date.now() ? Math.ceil((entry.until - Date.now()) / 60000) : 0;
 }
 
 async function handleAuth(req, res, url) {
@@ -111,21 +171,38 @@ async function handleAuth(req, res, url) {
   }
   if (url.pathname === '/login' && req.method === 'POST') {
     const ip = clientIp(req);
-    const entry = loginAttempts.get(ip);
-    if (entry && entry.until > Date.now()) {
-      const mins = Math.ceil((entry.until - Date.now()) / 60000);
-      return sendHtml(res, 429, loginPage(`Demasiados intentos. Prueba de nuevo en ${mins} min.`));
-    }
+    const mins = blockedFor(ip);
+    if (mins) return sendHtml(res, 429, loginPage(`Demasiados intentos. Prueba de nuevo en ${mins} min.`));
     const body = await readBody(req, 4096);
     const password = new URLSearchParams(body.toString()).get('password') || '';
-    if (!safeEqual(password, PASSWORD)) {
-      const count = (entry?.count || 0) + 1;
-      // Tras 5 fallos seguidos, bloqueo de 15 minutos para esa IP.
-      loginAttempts.set(ip, { count: count >= 5 ? 0 : count, until: count >= 5 ? Date.now() + 15 * 60000 : 0 });
-      await new Promise((r) => setTimeout(r, 500));
+    if (!checkPassword(password)) {
+      await failAttempt(ip);
       return sendHtml(res, 401, loginPage('Contraseña incorrecta'));
     }
     loginAttempts.delete(ip);
+    res.setHeader('set-cookie', sessionCookie(req, makeSession(), SESSION_DAYS * 86400));
+    return redirect(res, auth.mustChange ? '/cambiar-clave' : '/');
+  }
+  if (url.pathname === '/cambiar-clave') {
+    if (!isAuthenticated(req)) return redirect(res, '/login');
+    if (req.method === 'GET') return sendHtml(res, 200, changePage());
+    if (req.method !== 'POST') return false;
+    if (!sameOrigin(req)) return sendHtml(res, 403, changePage('Origen no permitido'));
+    const ip = clientIp(req);
+    const mins = blockedFor(ip);
+    if (mins) return sendHtml(res, 429, changePage(`Demasiados intentos. Prueba de nuevo en ${mins} min.`));
+    const form = new URLSearchParams((await readBody(req, 4096)).toString());
+    const [current, password, repeat] = ['current', 'password', 'repeat'].map((k) => form.get(k) || '');
+    if (!checkPassword(current)) {
+      await failAttempt(ip);
+      return sendHtml(res, 401, changePage('La contraseña actual no es correcta'));
+    }
+    if (password.length < MIN_PASSWORD) return sendHtml(res, 400, changePage(`La nueva contraseña necesita al menos ${MIN_PASSWORD} caracteres`));
+    if (password !== repeat) return sendHtml(res, 400, changePage('Las contraseñas nuevas no coinciden'));
+    if (password === current) return sendHtml(res, 400, changePage('La nueva contraseña tiene que ser distinta de la actual'));
+    loginAttempts.delete(ip);
+    savePassword(password, false);
+    console.log('Contraseña cambiada desde la web');
     res.setHeader('set-cookie', sessionCookie(req, makeSession(), SESSION_DAYS * 86400));
     return redirect(res, '/');
   }
@@ -234,7 +311,7 @@ if (CLAUDE_SOCKET) {
   }
 }
 // Sin contraseña no se ofrece nunca una terminal: cualquiera podría abrirla.
-const claudeEnabled = () => Boolean(PASSWORD && CLAUDE_SOCKET && pty && WebSocketServer);
+const claudeEnabled = () => Boolean(auth.enabled && CLAUDE_SOCKET && pty && WebSocketServer);
 
 function tmux(...args) {
   return new Promise((resolve) => {
@@ -307,6 +384,7 @@ function handleUpgrade(req, socket, head) {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname !== '/api/pty' || !claudeEnabled()) return reject(404);
   if (!isAuthenticated(req)) return reject(401);
+  if (auth.mustChange) return reject(403);
   if (!sameOrigin(req)) return reject(403);
   const slot = Number(url.searchParams.get('slot'));
   if (!Number.isInteger(slot) || slot < 1 || slot > CLAUDE_MAX) return reject(400);
@@ -390,7 +468,7 @@ async function handleApi(req, res, url) {
   const method = req.method;
 
   if (route === '/api/status' && method === 'GET') {
-    return sendJson(res, 200, { auth: Boolean(PASSWORD), b2: b2.enabled, bucket: b2.enabled ? b2.bucket : null, maxUploadMb: MAX_UPLOAD_BYTES / 1024 / 1024 });
+    return sendJson(res, 200, { auth: auth.enabled, b2: b2.enabled, bucket: b2.enabled ? b2.bucket : null, maxUploadMb: MAX_UPLOAD_BYTES / 1024 / 1024 });
   }
   if (route.startsWith('/api/claude') && (await handleClaudeApi(req, res, url)) !== false) return;
   if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
@@ -475,10 +553,15 @@ function serveStatic(req, res, url) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   try {
-    if (PASSWORD && (await handleAuth(req, res, url)) !== false) return;
+    if (auth.enabled && (await handleAuth(req, res, url)) !== false) return;
     if (!isAuthenticated(req)) {
       if (url.pathname.startsWith('/api/')) return sendJson(res, 401, { error: 'Sesión caducada: vuelve a iniciar sesión' });
       return redirect(res, '/login');
+    }
+    // Con una contraseña temporal no se puede usar nada hasta cambiarla.
+    if (auth.mustChange) {
+      if (url.pathname.startsWith('/api/')) return sendJson(res, 403, { error: 'Cambia la contraseña temporal para continuar' });
+      return redirect(res, '/cambiar-clave');
     }
     if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
     else serveStatic(req, res, url);
@@ -490,11 +573,24 @@ const server = http.createServer(async (req, res) => {
 });
 server.on('upgrade', handleUpgrade);
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+const isMain = process.argv[1] === fileURLToPath(import.meta.url);
+
+// `node server.js --temp-password`: crea una contraseña temporal que obliga a
+// cambiarla en el primer inicio de sesión, la muestra una vez y termina.
+// (Reinicia el servicio después para que la cargue.)
+if (isMain && process.argv.includes('--temp-password')) {
+  const alphabet = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const temp = Array.from(crypto.randomBytes(16), (b) => alphabet[b % alphabet.length]).join('').match(/.{4}/g).join('-');
+  savePassword(temp, true);
+  console.log(`Contraseña temporal: ${temp}`);
+  process.exit(0);
+}
+
+if (isMain) {
   // HOST=127.0.0.1 deja el puerto accesible solo desde la propia máquina (detrás de un proxy).
   server.listen(PORT, process.env.HOST || undefined, () => {
     console.log(`MiPuter en http://${process.env.HOST || 'localhost'}:${PORT}`);
-    console.log(PASSWORD ? 'Acceso protegido con contraseña' : '⚠️  Sin contraseña: define MIPUTER_PASSWORD en .env para proteger el acceso');
+    console.log(auth.enabled ? 'Acceso protegido con contraseña' : '⚠️  Sin contraseña: define MIPUTER_PASSWORD en .env para proteger el acceso');
     console.log(b2.enabled ? `Subidas → Backblaze B2 (bucket "${b2.bucket}", región ${b2.region})` : 'B2 no configurado: las subidas se guardan en el navegador');
     if (CLAUDE_SOCKET) console.log(claudeEnabled() ? `App Claude activa (máx. ${CLAUDE_MAX} sesiones)` : 'App Claude desactivada');
   });

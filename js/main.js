@@ -49,6 +49,11 @@ function renderStartMenu() {
     appsEl.appendChild(item);
   }
   if (storage.authEnabled()) {
+    const change = document.createElement('div');
+    change.className = 'start-item';
+    change.innerHTML = '<span class="glyph">🔑</span><span>Cambiar contraseña</span>';
+    change.onclick = () => location.assign('cambiar-clave');
+    appsEl.appendChild(change);
     const logout = document.createElement('div');
     logout.className = 'start-item start-logout';
     logout.innerHTML = '<span class="glyph">🔒</span><span>Cerrar sesión</span>';
