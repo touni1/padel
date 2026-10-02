@@ -157,6 +157,7 @@ Así está desplegado en un VPS Ubuntu 24.04 que ya tenía nginx y otras apps.
 | Servicio Claude | `miputer-claude.service` ([deploy/miputer-claude.service](deploy/miputer-claude.service)): servidor tmux como `mpclaude`, con [deploy/tmux.conf](deploy/tmux.conf) en `/etc/miputer-claude/` |
 | Proxy + HTTPS | nginx ([deploy/nginx-miputer.conf](deploy/nginx-miputer.conf)) → `127.0.0.1:8000`, con WebSocket. Certificado de Let's Encrypt con `certbot --nginx`, que se renueva solo |
 | nginx por defecto | `/etc/nginx/sites-available/00-default-https`: un dominio que llega por HTTPS sin server block propio recibe la conexión rechazada (`ssl_reject_handshake`) en vez de ver otro sitio del servidor |
+| Dominio raíz | `cloudar.co` y `www.cloudar.co` redirigen (302) a `miputer.cloudar.co` ([deploy/nginx-cloudar-redirect.conf](deploy/nginx-cloudar-redirect.conf), con su propio certificado) |
 | Firewall | ufw: SSH, 80 y 443 (más los puertos de otras apps que ya había). El 8000 solo escucha en `127.0.0.1` |
 
 **Editar la configuración** (contraseña y claves de B2):
