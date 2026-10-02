@@ -8,7 +8,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, createReadStream, statSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, createReadStream, statSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
@@ -450,6 +450,78 @@ async function handleClaudeApi(req, res, url) {
 }
 
 // ---------------------------------------------------------------------------
+// Árbol de carpetas en el servidor (/api/tree)
+// ---------------------------------------------------------------------------
+//
+// El árbol (carpetas, nombres, textos pequeños y la papelera) se guarda en
+// data/arbol.json para verlo igual desde cualquier navegador. Cada guardado sube
+// la versión; si un navegador escribe sobre una versión vieja recibe 409 con la
+// actual. Además se deja una copia en B2 (PREFIX/.arbol.json) para recuperarlo si
+// se pierde el disco del servidor.
+
+const DATA_DIR = join(ROOT, 'data');
+const TREE_FILE = join(DATA_DIR, 'arbol.json');
+const TREE_B2_KEY = `${PREFIX}.arbol.json`;
+const MAX_TREE_BYTES = 20 * 1024 * 1024;
+let tree = null; // { version, tree, updated }
+let treeBackupTimer = null;
+
+async function loadTree() {
+  if (tree) return tree;
+  if (existsSync(TREE_FILE)) {
+    tree = JSON.parse(readFileSync(TREE_FILE, 'utf8'));
+  } else if (b2.enabled) {
+    // Disco nuevo o perdido: se recupera la última copia de B2 si existe.
+    try {
+      const r = await b2Request('GET', TREE_B2_KEY);
+      tree = JSON.parse(await r.text());
+      saveTreeFile();
+      console.log(`Árbol de carpetas recuperado desde B2 (versión ${tree.version})`);
+    } catch (e) {
+      if (e.status !== 404) throw e;
+    }
+  }
+  tree ??= { version: 0, tree: null, updated: 0 };
+  return tree;
+}
+
+function saveTreeFile() {
+  mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  const tmp = `${TREE_FILE}.tmp`;
+  writeFileSync(tmp, JSON.stringify(tree), { mode: 0o600 });
+  renameSync(tmp, TREE_FILE);
+}
+
+function scheduleTreeBackup() {
+  if (!b2.enabled) return;
+  clearTimeout(treeBackupTimer);
+  treeBackupTimer = setTimeout(() => {
+    b2Request('PUT', TREE_B2_KEY, { body: Buffer.from(JSON.stringify(tree)), headers: { 'content-type': 'application/json' } }).catch((e) =>
+      console.error(`No se pudo copiar el árbol a B2: ${e.message}`),
+    );
+  }, 10_000);
+}
+
+async function handleTree(req, res) {
+  const current = await loadTree();
+  if (req.method === 'GET') return sendJson(res, 200, current);
+  if (req.method !== 'PUT') return sendJson(res, 405, { error: 'Método no permitido' });
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  let input;
+  try {
+    input = JSON.parse((await readBody(req, MAX_TREE_BYTES)).toString());
+  } catch (e) {
+    return sendJson(res, e.status || 400, { error: e.status ? e.message : 'Datos no válidos' });
+  }
+  if (input?.tree?.type !== 'dir' || typeof input.tree.children !== 'object') return sendJson(res, 400, { error: 'Árbol no válido' });
+  if (input.baseVersion !== current.version) return sendJson(res, 409, current);
+  tree = { version: current.version + 1, tree: input.tree, updated: Date.now() };
+  saveTreeFile();
+  scheduleTreeBackup();
+  return sendJson(res, 200, { version: tree.version });
+}
+
+// ---------------------------------------------------------------------------
 // Configurar B2 desde Ajustes
 // ---------------------------------------------------------------------------
 //
@@ -546,6 +618,7 @@ async function handleApi(req, res, url) {
   }
   if (route.startsWith('/api/claude') && (await handleClaudeApi(req, res, url)) !== false) return;
   if (route === '/api/b2-config') return handleB2Config(req, res);
+  if (route === '/api/tree') return handleTree(req, res);
   if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
 
   // Subir un archivo nuevo: POST /api/files?name=foto.png  (cuerpo = bytes)

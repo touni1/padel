@@ -22,7 +22,7 @@ function defaultTree() {
         '- Doble clic en un icono para abrirlo.\n' +
         '- Clic derecho en el escritorio para crear archivos y carpetas.\n' +
         '- Abre la Terminal y escribe "help" para ver los comandos.\n\n' +
-        'Todo se guarda en tu navegador (localStorage).\n'
+        'Tus carpetas se guardan en el servidor: las ves igual desde cualquier navegador.\n'
       ),
     }),
     Documentos: dir({
@@ -45,18 +45,156 @@ function load() {
 
 let root = load();
 
-function persist() {
+function saveLocal() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(root));
   } catch (e) {
     console.error('No se pudo guardar el sistema de archivos', e);
   }
+}
+
+function persist() {
+  saveLocal();
+  markDirty();
   listeners.forEach((fn) => fn());
 }
 
 export function onChange(fn) {
   listeners.add(fn);
   return () => listeners.delete(fn);
+}
+
+// ---------------------------------------------------------------------------
+// Sincronización con el servidor (/api/tree)
+// ---------------------------------------------------------------------------
+//
+// localStorage es solo una copia para arrancar rápido: el árbol de verdad vive en
+// el servidor. Cada cambio se envía con la versión sobre la que se hizo; si otro
+// navegador guardó antes (409), se adopta la versión del servidor.
+
+const SYNC_KEY = 'miputer.fs.sync';
+const syncListeners = new Set();
+let sync = (() => {
+  try {
+    return { version: 0, dirty: true, ...JSON.parse(localStorage.getItem(SYNC_KEY) || '{}') };
+  } catch {
+    return { version: 0, dirty: true };
+  }
+})();
+let serverAvailable = false;
+let seq = 0; // cuenta los cambios locales para saber si hubo otros mientras se enviaba
+let pushTimer = null;
+let pushing = null;
+
+function saveSync() {
+  try {
+    localStorage.setItem(SYNC_KEY, JSON.stringify(sync));
+  } catch {}
+}
+
+function markDirty() {
+  seq++;
+  sync.dirty = true;
+  saveSync();
+  if (!serverAvailable) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(push, 300);
+}
+
+// Avisos de sincronización: ({ type: 'remote' | 'conflict' | 'error', message })
+export function onSync(fn) {
+  syncListeners.add(fn);
+  return () => syncListeners.delete(fn);
+}
+const emitSync = (event) => syncListeners.forEach((fn) => fn(event));
+
+function adopt(server) {
+  root = server.tree;
+  sync = { version: server.version, dirty: false };
+  saveSync();
+  saveLocal();
+  listeners.forEach((fn) => fn());
+}
+
+async function push() {
+  if (pushing) return pushing.then(() => sync.dirty && push());
+  const sent = seq;
+  pushing = (async () => {
+    try {
+      const body = JSON.stringify({ baseVersion: sync.version, tree: root });
+      // keepalive deja terminar el envío aunque se cierre la pestaña (solo admite cuerpos pequeños).
+      const res = await fetch('api/tree', { method: 'PUT', headers: { 'content-type': 'application/json' }, body, keepalive: body.length < 60_000 });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        adopt(data);
+        emitSync({ type: 'conflict', message: 'Se cargaron los cambios hechos desde otro navegador' });
+      } else if (!res.ok) {
+        throw new Error(data.error || `Error ${res.status}`);
+      } else {
+        sync.version = data.version;
+        if (seq === sent) sync.dirty = false;
+        saveSync();
+      }
+    } catch (e) {
+      emitSync({ type: 'error', message: `No se pudieron guardar los cambios en el servidor: ${e.message}` });
+    } finally {
+      pushing = null;
+    }
+  })();
+  await pushing;
+  if (sync.dirty && seq !== sent) return push();
+}
+
+// Trae la versión del servidor (al arrancar, al volver a la pestaña y cada cierto
+// tiempo). La primera vez sube el árbol que ya hubiera en este navegador.
+export async function syncWithServer() {
+  let res;
+  try {
+    res = await fetch('api/tree');
+  } catch {
+    return;
+  }
+  if (!res.ok) return; // sin server.js (servidor estático) todo sigue solo en el navegador
+  serverAvailable = true;
+  const server = await res.json();
+  if (!server.tree) {
+    sync.version = server.version;
+    return push();
+  }
+  if (server.version === sync.version) {
+    if (sync.dirty) return push();
+    return;
+  }
+  if (sync.dirty && sync.version === 0 && hasOwnContent(root)) {
+    // Este navegador nunca sincronizó pero tiene archivos propios: no se pierden,
+    // se guardan en una carpeta dentro del árbol del servidor.
+    const local = root;
+    delete local.children.Papelera;
+    adopt(server);
+    const name = uniqueName('/', 'Recuperado de otro navegador');
+    root.children[name] = { ...local, mtime: now() };
+    persist();
+    emitSync({ type: 'conflict', message: `Lo que había en este navegador está en "/${name}"` });
+    return;
+  }
+  if (sync.dirty && sync.version !== 0) emitSync({ type: 'conflict', message: 'Se cargaron los cambios hechos desde otro navegador' });
+  else emitSync({ type: 'remote' });
+  adopt(server);
+}
+
+// ¿El árbol tiene algo distinto del contenido de ejemplo?
+function hasOwnContent(node) {
+  const strip = (n) => (n.type === 'dir' ? { d: Object.fromEntries(Object.entries(n.children).filter(([k]) => k !== 'Papelera').map(([k, c]) => [k, strip(c)])) } : { f: n.content, r: n.remote?.key });
+  return JSON.stringify(strip(node)) !== JSON.stringify(strip(defaultTree()));
+}
+
+export const pendingChanges = () => sync.dirty;
+
+// Envía ya lo pendiente (al cerrar u ocultar la pestaña).
+export function flush() {
+  if (!serverAvailable || !sync.dirty) return;
+  clearTimeout(pushTimer);
+  push();
 }
 
 export function normalize(path, cwd = '/') {

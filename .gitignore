@@ -4,3 +4,4 @@ node_modules/
 .password.json.tmp
 .b2.json
 .b2.json.tmp
+data/

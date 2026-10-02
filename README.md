@@ -8,7 +8,7 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 
 - **Escritorio** con iconos, menú contextual (clic derecho), arrastrar y soltar, y barra de tareas con reloj.
 - **Gestor de ventanas**: mover, redimensionar, minimizar, maximizar (doble clic en la barra de título) y enfocar.
-- **Sistema de archivos virtual** persistente en `localStorage` (carpetas, archivos, renombrar, duplicar, eliminar, mover).
+- **Sistema de archivos virtual** (carpetas, archivos, renombrar, duplicar, eliminar, mover) **guardado en el servidor**: lo ves igual desde cualquier navegador. Ver [Sincronización](#sincronización-de-carpetas).
 - **Papelera**: *Eliminar* (o arrastrar al icono 🗑️, o `rm` en la Terminal) mueve a la papelera; los archivos de B2 no se borran hasta vaciarla, eliminarlos desde ahí o pasar 30 días. Combina bien con una regla de ciclo de vida en el bucket (p. ej. borrar versiones ocultas a los 30 días) como segunda red.
 - Subida de archivos desde tu ordenador (botón ⤒ o arrastrándolos al escritorio o al explorador) y descarga.
 - **Archivos subidos guardados en Backblaze B2** (llevan una nube ☁ en el icono). Se pueden abrir, editar, duplicar, descargar y borrar; los cambios se aplican también en B2.
@@ -78,6 +78,15 @@ Si lo publicas en internet, sírvelo siempre con **HTTPS**, porque si no la cont
 ### Sin B2
 
 Si `.env` no está configurado (o sirves la carpeta con un servidor estático, como `python3 -m http.server`), todo sigue funcionando y las subidas se guardan en el navegador como antes.
+
+## Sincronización de carpetas
+
+El árbol de carpetas (nombres, carpetas, textos pequeños y la papelera) vive en el servidor, en `data/arbol.json`, y además se copia a B2 (`miputer/.arbol.json`) unos segundos después de cada cambio. Si se pierde el disco del servidor, se recupera solo desde B2 al arrancar.
+
+- El navegador guarda una copia en `localStorage` para cargar al instante y envía cada cambio en menos de un segundo, con la versión sobre la que se hizo.
+- Si otro navegador guardó antes, el servidor responde 409 y se carga su versión. Cada navegador busca cambios al volver a la pestaña y cada 20 s.
+- Un navegador que nunca sincronizó y tiene archivos propios no los pierde: se guardan en la carpeta **Recuperado de otro navegador**.
+- Sin `server.js` (servidor estático) todo sigue funcionando solo en el navegador, como antes.
 
 ## Estructura
 

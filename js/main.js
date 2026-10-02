@@ -2,7 +2,7 @@ import * as fs from './fs.js';
 import { register, list, launch } from './registry.js';
 import * as storage from './storage.js';
 import { renderIcons, folderMenu, moveInto, importFiles } from './fileActions.js';
-import { hideContextMenu, reportError, escapeHtml } from './ui.js';
+import { hideContextMenu, reportError, escapeHtml, toast } from './ui.js';
 import { applySettings } from './apps/settings.js';
 
 import files from './apps/files.js';
@@ -122,10 +122,18 @@ function wireDesktop() {
 applySettings();
 renderDesktop();
 renderStartMenu();
-storage.init().then(() => {
+storage.init().then(async () => {
   renderStartMenu();
+  await fs.syncWithServer();
   fs.purgeTrash();
 });
+
+// El árbol de carpetas vive en el servidor: se trae al volver a la pestaña y cada 20 s,
+// y lo pendiente se envía al ocultarla o cerrarla.
+fs.onSync((e) => e.message && toast(e.message).done(e.message, e.type === 'error'));
+setInterval(() => document.visibilityState === 'visible' && fs.syncWithServer(), 20_000);
+document.addEventListener('visibilitychange', () => (document.visibilityState === 'visible' ? fs.syncWithServer() : fs.flush()));
+window.addEventListener('pagehide', fs.flush);
 startClock();
 wireDesktop();
 fs.onChange(renderDesktop);
