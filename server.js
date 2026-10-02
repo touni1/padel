@@ -25,9 +25,16 @@ const B2_FILE = join(ROOT, '.b2.json');
 
 function makeB2Config({ keyId, appKey, bucket, endpoint, region }) {
   const cfg = { keyId: String(keyId || '').trim(), appKey: String(appKey || '').trim(), bucket: String(bucket || '').trim() };
-  // p. ej. https://s3.us-west-004.backblazeb2.com
+  // p. ej. https://s3.us-west-004.backblazeb2.com. El panel de B2 lo muestra con el
+  // bucket pegado ("s3.us-east-005.backblazeb2.com/mi-bucket"): esa parte se separa.
   cfg.endpoint = String(endpoint || '').trim().replace(/\/+$/, '');
   if (cfg.endpoint && !/^https?:\/\//.test(cfg.endpoint)) cfg.endpoint = `https://${cfg.endpoint}`;
+  try {
+    const u = new URL(cfg.endpoint);
+    const path = decodeURIComponent(u.pathname.replace(/^\/+|\/+$/g, ''));
+    if (path && !cfg.bucket) cfg.bucket = path;
+    if (cfg.endpoint) cfg.endpoint = u.origin;
+  } catch {}
   cfg.enabled = Boolean(cfg.keyId && cfg.appKey && cfg.bucket && cfg.endpoint);
   cfg.region = region || cfg.endpoint.match(/s3\.([a-z0-9-]+)\.backblazeb2\.com/)?.[1] || 'us-east-1';
   return cfg;
@@ -473,7 +480,7 @@ async function handleB2Config(req, res) {
   if (!/^https:\/\/s3\.[a-z0-9-]+\.backblazeb2\.com$/.test(cfg.endpoint)) {
     return sendJson(res, 400, { error: 'El endpoint tiene que ser del tipo s3.<región>.backblazeb2.com' });
   }
-  if (!/^[A-Za-z0-9-]{6,63}$/.test(cfg.bucket)) return sendJson(res, 400, { error: 'Nombre de bucket no válido' });
+  if (!/^[A-Za-z0-9][A-Za-z0-9.-]{4,61}[A-Za-z0-9]$/.test(cfg.bucket)) return sendJson(res, 400, { error: `Nombre de bucket no válido: "${cfg.bucket}"` });
 
   const testKey = `${PREFIX}.prueba-de-conexion`;
   try {

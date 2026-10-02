@@ -63,7 +63,7 @@ export default {
             <input name="keyId" placeholder="keyID" autocomplete="off" spellcheck="false" required>
             <input name="appKey" type="password" placeholder="applicationKey" autocomplete="new-password" required>
             <input name="bucket" placeholder="Nombre del bucket" autocomplete="off" spellcheck="false" required>
-            <input name="endpoint" placeholder="Endpoint (s3.us-east-005.backblazeb2.com)" autocomplete="off" spellcheck="false" required>
+            <input name="endpoint" placeholder="Endpoint, tal como lo muestra B2" autocomplete="off" spellcheck="false" required>
             <button class="btn" type="submit">Probar y guardar</button>
           </form>
         </section>
