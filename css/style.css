@@ -520,3 +520,21 @@ button.btn.primary { background: var(--accent); border-color: var(--accent); col
 
 /* Miniaturas en los iconos */
 .icon img.thumb { width: 56px; height: 44px; object-fit: cover; border-radius: 4px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4); background: #0003; }
+
+/* Reproductor */
+.window-body.player { display: flex; overflow: hidden; background: #111; color: #ddd; outline: none; }
+.player-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.player-screen { flex: 1; min-height: 0; position: relative; display: flex; align-items: center; justify-content: center; }
+.player-screen video { width: 100%; height: 100%; background: #000; }
+.player-cover { position: absolute; inset: 0 0 64px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; pointer-events: none; background: radial-gradient(circle, #2a2f3a, #111 70%); }
+.player-cover span { font-size: 72px; }
+.player-cover b { font-size: 16px; max-width: 90%; text-align: center; overflow-wrap: anywhere; }
+.player-bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: #1b1b1b; font-size: 13px; }
+.player-bar button { padding: 3px 10px; border: 1px solid #333; border-radius: 6px; background: #262626; color: #eee; cursor: pointer; }
+.player-bar button.active { background: var(--accent); border-color: var(--accent); }
+.player-now { flex: 1; text-align: right; color: #aaa; }
+.player-list { width: 230px; margin: 0; padding: 6px; overflow: auto; list-style: none; border-left: 1px solid #262626; font-size: 13px; }
+.player-list li { display: flex; gap: 6px; padding: 6px 8px; border-radius: 6px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-list li:hover { background: #222; }
+.player-list li.playing { background: var(--accent); color: #fff; }
+@media (max-width: 700px) { .player-list { display: none; } }

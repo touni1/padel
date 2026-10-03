@@ -33,7 +33,7 @@ export function openPath(path) {
   // Archivos de B2 que no son texto: lo que el navegador sabe mostrar se abre en una
   // pestaña y el resto (zip, rar, docx…) se descarga.
   if (remote && !storage.isTextType(remote.type, path)) {
-    if (OPEN_IN_TAB.includes(ext) || /^(video|audio)\//.test(remote.type) || remote.type === 'application/pdf') {
+    if (/^(video|audio)\//.test(remote.type) || remote.type === 'application/pdf') {
       return window.open(storage.url(remote.key), '_blank', 'noopener');
     }
     const a = document.createElement('a');
@@ -44,7 +44,6 @@ export function openPath(path) {
   return apps.get('editor').launch({ path });
 }
 
-const OPEN_IN_TAB = ['mp4', 'webm', 'mov', 'mp3', 'wav', 'ogg', 'm4a'];
 
 export function glyphFor(entry) {
   if (entry.type === 'dir') return '📁';

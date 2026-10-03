@@ -29,7 +29,8 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 | ✳️ Claude | Terminal **real** del servidor con [Claude Code](https://claude.com/claude-code) (ver [App Claude](#app-claude)) |
 | 🧮 Calculadora | Con paréntesis y soporte de teclado (sin `eval`) |
 | 🌐 Navegador | Navega URLs en un iframe o muestra archivos `.html` del sistema virtual |
-| 🖼️ Visor de imágenes | Abre imágenes subidas |
+| 🖼️ Fotos | Galería de la carpeta: flechas, zoom con la rueda, arrastrar, pantalla completa. Las fotos y vídeos tienen miniatura (hecha al subir, guardada en el servidor) |
+| 🎵 Reproductor | Música y vídeo de la carpeta como lista: siguiente automático, aleatorio, repetir, teclas multimedia; sigue sonando minimizado |
 | 📕 Editor de PDF | Texto, resaltar, tapar, dibujar y firmar; rellenar formularios; rotar, mover y borrar páginas; unir PDFs. Guarda sobre el archivo o como copia (pdf.js + pdf-lib, en `js/vendor/`) |
 | 🔍 Buscar | Busca archivos y carpetas por nombre en todo MiPuter, sin distinguir mayúsculas ni acentos |
 | 🗑️ Papelera | Lo eliminado va aquí: restaurar a su sitio, eliminar para siempre o vaciar. Se borra solo a los 30 días |

@@ -322,7 +322,8 @@ const RANGE_BYTES = 32 * 1024 * 1024; // cada tramo es una lectura (transacción
 
 function b2RangeStream(key, start, end) {
   let next = start; // siguiente byte a pedir
-  const ahead = []; // tramos ya pedidos, en orden (hasta 2 por delante del que se envía)
+  let size = 4 * 1024 * 1024; // los tramos empiezan chicos y se duplican hasta RANGE_BYTES
+  const ahead = []; // tramos ya pedidos, en orden (como mucho uno por delante del que se envía)
   const fetchRange = async (from, to) => {
     for (let attempt = 1; ; attempt++) {
       try {
@@ -336,9 +337,12 @@ function b2RangeStream(key, start, end) {
       }
     }
   };
+  // Empezar chico y adelantar solo un tramo importa con vídeo y audio: al saltar a otro
+  // punto el navegador abandona la petición, y lo ya pedido a B2 se habría tirado.
   const fill = () => {
-    while (ahead.length < 3 && next < end) {
-      const to = Math.min(end, next + RANGE_BYTES);
+    while (ahead.length < 2 && next < end) {
+      const to = Math.min(end, next + size);
+      size = Math.min(RANGE_BYTES, size * 2);
       const p = fetchRange(next, to);
       p.catch(() => {}); // el error se recoge al esperarlo, en orden
       ahead.push(p);
