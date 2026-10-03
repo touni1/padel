@@ -3,7 +3,7 @@
 // el servidor solo pasa mensajes con el puente (ver deploy/claude-chat-bridge.mjs).
 import * as fs from '../fs.js';
 import { createWindow } from '../wm.js';
-import { escapeHtml, toast, reportError } from '../ui.js';
+import { escapeHtml, toast, reportError, contextMenu, confirm, prompt } from '../ui.js';
 import { launch } from '../registry.js';
 import { pickFiles, readBytes } from '../pdfkit.js';
 
@@ -411,16 +411,42 @@ export default {
     function renderConvs(items) {
       convsEl.innerHTML = items.length ? '' : '<p class="cc-empty-list">Aún no hay conversaciones</p>';
       for (const c of items) {
-        const b = document.createElement('button');
+        const b = document.createElement('div');
         b.className = `cc-conv${c.id === session ? ' active' : ''}`;
-        b.innerHTML = '<span></span><small></small>';
-        b.firstChild.textContent = c.title;
-        b.lastChild.textContent = when(c.updated);
-        b.onclick = () => reportError(() => openConversation(c));
+        b.innerHTML = '<span></span><small></small><button class="cc-conv-more" title="Opciones">⋯</button>';
+        b.querySelector('span').textContent = c.title;
+        b.querySelector('small').textContent = when(c.updated);
+        b.onclick = (e) => !e.target.closest('.cc-conv-more') && reportError(() => openConversation(c));
+        const menu = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const r = e.target.getBoundingClientRect();
+          contextMenu(e.clientX || r.left, e.clientY || r.bottom, [
+            { label: 'Renombrar', action: () => renameConversation(c) },
+            { label: 'Eliminar', action: () => deleteConversation(c) },
+          ]);
+        };
+        b.oncontextmenu = menu;
+        b.querySelector('.cc-conv-more').onclick = menu;
         convsEl.appendChild(b);
       }
     }
     const refreshList = () => op({ op: 'list' }).catch(() => {});
+
+    async function renameConversation(c) {
+      const title = await prompt('Renombrar conversación', 'Nuevo nombre:', c.title);
+      if (!title || title === c.title) return;
+      await op({ op: 'rename', session: c.id, title });
+      if (c.id === session) $('.cc-title').textContent = title;
+    }
+
+    async function deleteConversation(c) {
+      if (!(await confirm('Eliminar conversación', `¿Eliminar "${c.title}"? No se puede recuperar. Los archivos que Claude haya creado en su carpeta no se borran.`))) return;
+      // Si es la que está abierta, primero se cierra (así Claude no la vuelve a escribir).
+      if (c.id === session) await reset();
+      await op({ op: 'delete', session: c.id });
+      toast('Conversación eliminada').done();
+    }
 
     function welcome() {
       msgsEl.innerHTML = `

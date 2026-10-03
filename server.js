@@ -1661,7 +1661,7 @@ async function handleB2Config(req, res) {
 // pasar las órdenes conocidas.
 
 const CHAT_SOCKET = process.env.CLAUDE_CHAT_SOCKET || '/run/miputer-claude-chat/chat.sock';
-const CHAT_OPS = new Set(['list', 'history', 'start', 'send', 'attach', 'permission', 'interrupt', 'mode']);
+const CHAT_OPS = new Set(['list', 'history', 'start', 'send', 'attach', 'permission', 'interrupt', 'mode', 'delete', 'rename']);
 const chatWss = WebSocketServer ? new WebSocketServer({ noServer: true, maxPayload: 40 * 1024 * 1024 }) : null;
 
 function handleChatUpgrade(req, socket, head, reject) {

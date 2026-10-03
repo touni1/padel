@@ -8,7 +8,7 @@
 // Se instala en /opt/miputer-claude-chat/bridge.mjs. Sin dependencias.
 import net from 'node:net';
 import { spawn } from 'node:child_process';
-import { readdirSync, statSync, readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, unlinkSync } from 'node:fs';
+import { readdirSync, statSync, readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, unlinkSync, rmSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -22,8 +22,21 @@ const modeOf = (m) => (m === 'default' ? 'manual' : MODES.includes(m) ? m : 'acc
 const PROJECT_DIR = join(process.env.HOME, '.claude', 'projects', WORKDIR.replace(/[^a-zA-Z0-9]/g, '-'));
 let running = 0;
 
+// Títulos puestos a mano desde MiPuter (Claude Code no guarda uno propio).
+const TITLES_FILE = join(process.env.HOME, '.claude', 'miputer-titulos.json');
+const loadTitles = () => {
+  try {
+    return JSON.parse(readFileSync(TITLES_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+};
+const saveTitles = (t) => writeFileSync(TITLES_FILE, JSON.stringify(t), { mode: 0o600 });
+const validId = (id) => /^[\w-]{8,64}$/.test(String(id || ''));
+
 function conversations() {
   if (!existsSync(PROJECT_DIR)) return [];
+  const titles = loadTitles();
   return readdirSync(PROJECT_DIR)
     .filter((f) => f.endsWith('.jsonl'))
     .map((f) => {
@@ -42,7 +55,8 @@ function conversations() {
         } catch {}
         if (title) break;
       }
-      return { id: basename(f, '.jsonl'), title: (title || 'Conversación').slice(0, 80), updated: statSync(file).mtimeMs };
+      const id = basename(f, '.jsonl');
+      return { id, title: (titles[id] || title || 'Conversación').slice(0, 80), updated: statSync(file).mtimeMs };
     })
     .sort((a, b) => b.updated - a.updated)
     .slice(0, 100);
@@ -152,6 +166,25 @@ function handle(conn) {
         if (msg.allow && msg.always && msg.tool) allowAlways.add(String(msg.tool));
         const response = msg.allow ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: 'La persona rechazó esta acción desde MiPuter.' };
         return toClaude({ type: 'control_response', response: { subtype: 'success', request_id: msg.id, response } });
+      }
+      case 'delete': {
+        // Borra la conversación (y lo que Claude Code guardó junto a ella).
+        if (!validId(msg.session)) return;
+        rmSync(join(PROJECT_DIR, `${msg.session}.jsonl`), { force: true });
+        rmSync(join(PROJECT_DIR, msg.session), { recursive: true, force: true });
+        const t = loadTitles();
+        delete t[msg.session];
+        saveTitles(t);
+        return send({ ev: 'list', items: conversations() });
+      }
+      case 'rename': {
+        if (!validId(msg.session)) return;
+        const t = loadTitles();
+        const title = String(msg.title || '').trim().slice(0, 80);
+        if (title) t[msg.session] = title;
+        else delete t[msg.session];
+        saveTitles(t);
+        return send({ ev: 'list', items: conversations() });
       }
       case 'interrupt':
         return control({ subtype: 'interrupt' });
