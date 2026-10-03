@@ -17,6 +17,9 @@ Group=mpweb
 Environment=HOME=/home/mpweb
 Environment=DISPLAY=:5
 Environment=LANG=C.UTF-8
+Environment=LANGUAGE=es_419:es
+# Lo que descarga queda legible para MiPuter (grupo mpweb).
+UMask=0007
 WorkingDirectory=/home/mpweb
 # Espera a que la pantalla esté lista.
 ExecStartPre=/bin/sh -c 'for i in $(seq 50); do [ -S /tmp/.X11-unix/X5 ] && exit 0; sleep 0.2; done; exit 1'
