@@ -8,10 +8,13 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, createReadStream, statSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, copyFileSync } from 'node:fs';
+import { existsSync, createReadStream, createWriteStream, statSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, copyFileSync } from 'node:fs';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { mkdtemp, writeFile, stat, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 if (existsSync(join(ROOT, '.env'))) process.loadEnvFile(join(ROOT, '.env'));
@@ -950,6 +953,91 @@ async function handleZipApi(req, res, url) {
 }
 
 // ---------------------------------------------------------------------------
+// Herramientas PDF del servidor (/api/pdf): comprimir, proteger, quitar
+// contraseña y reparar, con Ghostscript y qpdf
+// ---------------------------------------------------------------------------
+//
+// Lo que se puede hacer en el navegador (unir, dividir, numerar…) se hace allí;
+// esto es lo que necesita programas del sistema. El PDF se baja de B2 a una
+// carpeta temporal privada del servicio (PrivateTmp), se procesa con tiempo
+// límite y el resultado se sube a B2. Las contraseñas van en un archivo de
+// argumentos (qpdf @archivo), no en la línea de comandos que ve `ps`.
+
+const PDF_MAX_BYTES = 300 * 1024 * 1024;
+const PDF_TIMEOUT_MS = 5 * 60_000;
+const GS_QUALITY = { baja: '/printer', media: '/ebook', alta: '/screen' }; // "alta" = comprime más
+
+function run(cmd, args) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout: PDF_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      // qpdf sale con 3 cuando terminó bien pero con avisos (p. ej. tras reparar).
+      if (err && !(cmd === 'qpdf' && err.code === 3)) {
+        const msg = `${stderr || ''}`.trim().split('\n').slice(-2).join(' ') || err.message;
+        return reject(new Error(/password/i.test(msg) ? 'Contraseña incorrecta' : msg.slice(0, 300)));
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+async function handlePdfOps(req, res) {
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
+  let input;
+  try {
+    input = JSON.parse((await readBody(req, 8192)).toString());
+  } catch {
+    return sendJson(res, 400, { error: 'Datos no válidos' });
+  }
+  const { op } = input;
+  if (!['compress', 'protect', 'unlock', 'repair'].includes(op)) return sendJson(res, 400, { error: 'Operación no válida' });
+  const key = checkKey(input.key);
+  const password = String(input.password || '');
+  if (op === 'protect' && !password) return sendJson(res, 400, { error: 'Falta la contraseña' });
+  if (/[\r\n]/.test(password)) return sendJson(res, 400, { error: 'La contraseña no puede tener saltos de línea' });
+  if (op === 'protect' && password.length > 128) return sendJson(res, 400, { error: 'Contraseña demasiado larga' });
+  const head = await b2Request('HEAD', key);
+  const size = Number(head.headers.get('content-length')) || 0;
+  if (size > PDF_MAX_BYTES) return sendJson(res, 413, { error: 'El PDF supera 300 MB' });
+  const name = String(input.name || 'documento.pdf').slice(0, 200);
+
+  const id = startJob(async (job) => {
+    const dir = await mkdtemp(join(tmpdir(), 'miputer-pdf-'));
+    const src = join(dir, 'entrada.pdf');
+    const out = join(dir, 'salida.pdf');
+    try {
+      await pipeline(b2RangeStream(key, 0, size), createWriteStream(src, { mode: 0o600 }));
+      job.progress = 0.3;
+      if (op === 'compress') {
+        const level = GS_QUALITY[input.level] || GS_QUALITY.media;
+        await run('gs', ['-dSAFER', '-dBATCH', '-dNOPAUSE', '-dQUIET', '-sDEVICE=pdfwrite', '-dCompatibilityLevel=1.6', `-dPDFSETTINGS=${level}`, '-dDetectDuplicateImages=true', `-sOutputFile=${out}`, src]);
+      } else if (op === 'repair') {
+        await run('qpdf', ['--object-streams=generate', src, out]);
+      } else {
+        // Contraseña en un archivo de argumentos, uno por línea.
+        const argfile = join(dir, 'args');
+        const args =
+          op === 'protect'
+            ? ['--encrypt', password, `${password}-${crypto.randomBytes(16).toString('hex')}`, '256', '--', src, out]
+            : [...(password ? [`--password=${password}`] : []), '--decrypt', src, out];
+        await writeFile(argfile, `${args.join('\n')}\n`, { mode: 0o600 });
+        await run('qpdf', [`@${argfile}`]);
+      }
+      job.progress = 0.8;
+      const outSize = (await stat(out)).size;
+      // Comprimir no siempre achica (PDF ya optimizado): en ese caso se avisa en vez de engordarlo.
+      if (op === 'compress' && outSize >= size) return { unchanged: true, size };
+      const newKeyName = newKey(name);
+      await streamToB2(createReadStream(out), newKeyName, 'application/pdf');
+      return { key: newKeyName, size: outSize, type: 'application/pdf', before: size };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+  return sendJson(res, 202, { job: id });
+}
+
+// ---------------------------------------------------------------------------
 // Enlaces de descarga para compartir (/d/<token>)
 // ---------------------------------------------------------------------------
 //
@@ -1257,6 +1345,7 @@ async function handleApi(req, res, url) {
   if (route === '/api/shares') return handleSharesApi(req, res, url);
   if (route === '/api/thumbs') return handleThumbs(req, res, url);
   if (route === '/api/zip' || route === '/api/unzip' || route === '/api/jobs') return handleZipApi(req, res, url);
+  if (route === '/api/pdf' && method === 'POST') return handlePdfOps(req, res);
   if (route.startsWith('/api/uploads')) {
     if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
     return handleUploads(req, res, url);

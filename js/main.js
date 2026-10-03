@@ -21,12 +21,13 @@ import search from './apps/search.js';
 import player from './apps/player.js';
 import office from './apps/office.js';
 import imgedit from './apps/imgedit.js';
+import pdftools from './apps/pdftools.js';
 import notes, { renderNotes, newNote } from './apps/notes.js';
 import calendar, { checkReminders } from './apps/calendar.js';
 
 const DESKTOP_DIR = '/Escritorio';
 
-[files, search, editor, terminal, claude, calculator, browser, viewer, imgedit, pdf, player, office, calendar, notes, settings, shares, trash].forEach(register);
+[files, search, editor, terminal, claude, calculator, browser, viewer, imgedit, pdf, pdftools, player, office, calendar, notes, settings, shares, trash].forEach(register);
 
 function appIcon(app) {
   const el = document.createElement('div');

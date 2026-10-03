@@ -8,41 +8,9 @@ import * as fs from '../fs.js';
 import * as storage from '../storage.js';
 import { createWindow } from '../wm.js';
 import { prompt, confirm, alert, toast, reportError } from '../ui.js';
+import { loadLibs, readBytes, pdfjsOptions, pickFiles } from '../pdfkit.js';
 
-const VENDOR = new URL('../vendor/', import.meta.url).href;
 const SIGNATURE_KEY = 'miputer.firma';
-
-let libsPromise;
-function loadLibs() {
-  libsPromise ??= Promise.all([import(`${VENDOR}pdfjs/pdf.min.mjs`), import(`${VENDOR}pdf-lib/pdf-lib.esm.min.js`)]).then(
-    ([pdfjs, PDFLib]) => {
-      pdfjs.GlobalWorkerOptions.workerSrc = `${VENDOR}pdfjs/pdf.worker.min.mjs`;
-      return { pdfjs, PDFLib };
-    },
-    (e) => {
-      libsPromise = null;
-      throw e;
-    },
-  );
-  return libsPromise;
-}
-
-async function readBytes(path) {
-  const remote = fs.getRemote(path);
-  const res = await fetch(remote ? storage.url(remote.key) : fs.readFile(path));
-  if (!res.ok) throw new Error(`No se pudo leer el PDF (${res.status})`);
-  return new Uint8Array(await res.arrayBuffer());
-}
-
-// Todos los PDF del sistema de archivos (para "Insertar PDF").
-function allPdfs(dir = '/', out = []) {
-  for (const e of fs.readdir(dir)) {
-    if (e.path === fs.TRASH) continue;
-    if (e.type === 'dir') allPdfs(e.path, out);
-    else if (fs.extname(e.name) === 'pdf') out.push(e.path);
-  }
-  return out;
-}
 
 // pdf-lib minificado no conserva los nombres de clase: el tipo se averigua con instanceof.
 function fieldKind(f, L) {
@@ -55,25 +23,7 @@ function fieldKind(f, L) {
 
 const hex = (c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
 
-function pickPdf(exclude) {
-  return new Promise((resolve) => {
-    const list = allPdfs().filter((p) => p !== exclude);
-    let chosen = null;
-    const win = createWindow({ title: 'Insertar PDF', width: 420, height: 360, onClose: () => resolve(chosen) });
-    win.body.innerHTML = `<div class="pdf-pick">${list.length ? '' : '<p>No hay otros PDF en tu MiPuter.</p>'}</div>`;
-    const box = win.body.firstElementChild;
-    for (const p of list) {
-      const b = document.createElement('button');
-      b.className = 'btn';
-      b.textContent = `📕 ${p}`;
-      b.onclick = () => {
-        chosen = p;
-        win.close();
-      };
-      box.appendChild(b);
-    }
-  });
-}
+const pickPdf = async (exclude) => (await pickFiles({ title: 'Insertar PDF', exts: ['pdf'], exclude: [exclude] }))?.[0] || null;
 
 // Panel para dibujar la firma. Devuelve un PNG recortado (dataURL) o null.
 function signaturePad() {
@@ -163,6 +113,7 @@ export default {
         <button data-tool="text" title="Texto">T</button>
         <button data-tool="highlight" title="Resaltar">🖍️</button>
         <button data-tool="whiteout" title="Tapar (rectángulo blanco)">⬜</button>
+        <button data-tool="redact" title="Tachar: al guardar, el contenido debajo se borra de verdad (la página pasa a imagen)">⬛</button>
         <button data-tool="ink" title="Dibujar">✏️</button>
         <button data-tool="sign" title="Firma">✍️</button>
         <input type="color" value="#d0021b" title="Color">
@@ -232,14 +183,7 @@ export default {
 
     async function addSource(name, bytes) {
       // pdf.js se queda con el buffer: se le pasa una copia.
-      const pdf = await libs.pdfjs.getDocument({
-        data: bytes.slice(),
-        cMapUrl: `${VENDOR}pdfjs/cmaps/`,
-        cMapPacked: true,
-        standardFontDataUrl: `${VENDOR}pdfjs/standard_fonts/`,
-        wasmUrl: `${VENDOR}pdfjs/wasm/`,
-        iccUrl: `${VENDOR}pdfjs/iccs/`,
-      }).promise;
+      const pdf = await libs.pdfjs.getDocument(pdfjsOptions(bytes.slice())).promise;
       sources.push({ name, bytes, pdf });
       return sources.length - 1;
     }
@@ -467,7 +411,10 @@ export default {
           a = { type: 'ink', points: [toPdf(start)], color: colorEl.value, width: Math.max(1, Number(sizeEl.value) / 6) };
         } else {
           const [x, y] = toPdf(start);
-          a = tool === 'highlight' ? { type: 'rect', x1: x, y1: y, x2: x, y2: y, color: '#ffe14d', opacity: 0.45 } : { type: 'rect', x1: x, y1: y, x2: x, y2: y, color: '#ffffff', opacity: 1 };
+          a =
+            tool === 'highlight'
+              ? { type: 'rect', x1: x, y1: y, x2: x, y2: y, color: '#ffe14d', opacity: 0.45 }
+              : { type: 'rect', x1: x, y1: y, x2: x, y2: y, color: tool === 'redact' ? '#000000' : '#ffffff', opacity: 1, redact: tool === 'redact' };
         }
         annots.push(a);
         svg.onpointermove = (ev) => {
@@ -535,7 +482,9 @@ export default {
       }
       // Si cambian las páginas (orden, borradas, de otro PDF) se arma un PDF nuevo
       // y los formularios se "aplanan" para no perder lo rellenado.
-      const structural = pages.length !== sources[0].pdf.numPages || pages.some((p, i) => p.src !== 0 || p.index !== i);
+      // Tachar borra de verdad: esas páginas se rehacen como imagen, así que también se arma un PDF nuevo.
+      const redacted = pages.map((p) => p.annots.some((a) => a.redact));
+      const structural = redacted.some(Boolean) || pages.length !== sources[0].pdf.numPages || pages.some((p, i) => p.src !== 0 || p.index !== i);
       let out;
       let outPages;
       if (!structural) {
@@ -549,7 +498,11 @@ export default {
         }
         out = await PDFDocument.create();
         outPages = [];
-        for (const p of pages) {
+        for (const [i, p] of pages.entries()) {
+          if (redacted[i]) {
+            outPages.push(await rasterize(out, p));
+            continue;
+          }
           const [copy] = await out.copyPages(docs[p.src], [p.index]);
           outPages.push(out.addPage(copy));
         }
@@ -598,6 +551,31 @@ export default {
         }
       }
       return out.save();
+    }
+
+    // Rehace una página como imagen (150 ppp) con los recuadros de "tachar" ya pintados:
+    // el texto y las imágenes que había debajo dejan de existir en el archivo.
+    async function rasterize(out, p) {
+      const pg = await proxy(p);
+      const viewport = pg.getViewport({ scale: 150 / 72, rotation: 0 });
+      const canvas = Object.assign(document.createElement('canvas'), { width: Math.ceil(viewport.width), height: Math.ceil(viewport.height) });
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await pg.render({ canvas, canvasContext: ctx, viewport }).promise;
+      ctx.fillStyle = '#000';
+      for (const a of p.annots.filter((x) => x.redact)) {
+        const [x1, y1] = viewport.convertToViewportPoint(a.x1, a.y1);
+        const [x2, y2] = viewport.convertToViewportPoint(a.x2, a.y2);
+        ctx.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+      }
+      const jpg = await out.embedJpg(await (await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.92))).arrayBuffer());
+      const [vx0, vy0, vx1, vy1] = pg.view;
+      const page = out.addPage([vx1 - vx0, vy1 - vy0]);
+      page.setMediaBox(vx0, vy0, vx1 - vx0, vy1 - vy0);
+      page.drawImage(jpg, { x: vx0, y: vy0, width: vx1 - vx0, height: vy1 - vy0 });
+      page.setRotation(libs.PDFLib.degrees(pg.rotate));
+      return page;
     }
 
     async function save(asCopy) {

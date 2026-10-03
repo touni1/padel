@@ -237,6 +237,7 @@ export function entryMenu(e, path) {
   ];
   if (!fs.isDir(path)) items.push({ label: 'Descargar', action: () => download(path) });
   if (/^(jpe?g|png|webp|gif|bmp)$/.test(fs.extname(path)) && !path.startsWith(fs.TRASH + '/')) items.push({ label: 'Editar imagen', action: () => reportError(() => launch('imgedit', { path })) });
+  if (/^(pdf|jpe?g|png|webp|gif|bmp)$/.test(fs.extname(path)) && !path.startsWith(fs.TRASH + '/')) items.push({ label: 'Herramientas PDF…', action: () => reportError(() => launch('pdftools', { files: [path] })) });
   if (!fs.isDir(path) && !path.startsWith(fs.TRASH + '/') && storage.enabled()) items.push({ label: 'Compartir enlace…', action: () => shareFile(path) });
   if (!path.startsWith(fs.TRASH + '/') && storage.enabled()) {
     items.push('sep', { label: 'Comprimir en ZIP', action: () => compressEntry(path) });

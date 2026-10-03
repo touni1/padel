@@ -33,8 +33,9 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 | 🖼️ Fotos | Galería de la carpeta: flechas, zoom con la rueda, arrastrar, pantalla completa. Las fotos y vídeos tienen miniatura (hecha al subir, guardada en el servidor) |
 | 📘 Documentos | Ver Word (.docx) y hojas de cálculo (.xlsx, .xls, .ods, con pestañas por hoja) sin descargarlos. Solo lectura, en un iframe aislado sin scripts (mammoth y SheetJS en `js/vendor/`) |
 | 🎨 Editor de imágenes | Clic derecho en una foto → *Editar imagen* (o ✏️ en la galería): rotar, voltear, recortar, cambiar tamaño, brillo, contraste y saturación |
+| 🧰 Herramientas PDF | Al estilo iLovePDF: unir, dividir, extraer y quitar páginas, rotar, numerar, marca de agua, recortar márgenes, PDF→JPG y JPG→PDF (en el navegador); comprimir, proteger con contraseña (AES-256), desbloquear y reparar (en el servidor, con Ghostscript y qpdf). También desde clic derecho → *Herramientas PDF…* |
 | 🎵 Reproductor | Música y vídeo de la carpeta como lista: siguiente automático, aleatorio, repetir, teclas multimedia; sigue sonando minimizado |
-| 📕 Editor de PDF | Texto, resaltar, tapar, dibujar y firmar; rellenar formularios; rotar, mover y borrar páginas; unir PDFs. Guarda sobre el archivo o como copia (pdf.js + pdf-lib, en `js/vendor/`) |
+| 📕 Editor de PDF | Texto, resaltar, tapar, **tachar** (borra de verdad lo de debajo: la página pasa a imagen), dibujar y firmar; rellenar formularios; rotar, mover y borrar páginas; unir PDFs. Guarda sobre el archivo o como copia (pdf.js + pdf-lib, en `js/vendor/`) |
 | 🔍 Buscar | Busca archivos y carpetas por nombre en todo MiPuter, sin distinguir mayúsculas ni acentos |
 | 🗑️ Papelera | Lo eliminado va aquí: restaurar a su sitio, eliminar para siempre o vaciar. Se borra solo a los 30 días |
 | 📅 Calendario | Mes con eventos (hora y aviso opcionales). Clic en el reloj para abrirlo. Los avisos salen mientras MiPuter esté abierto, también como notificación del sistema |
@@ -213,7 +214,7 @@ sudo -u miputer tmux -S /run/miputer-claude/tmux.sock ls   # sesiones de Claude 
 **Instalación desde cero** (resumen de lo que se hizo):
 
 ```bash
-sudo apt install -y build-essential tmux nginx certbot python3-certbot-nginx   # build-essential: compilar node-pty
+sudo apt install -y build-essential tmux nginx certbot python3-certbot-nginx qpdf ghostscript   # build-essential: node-pty; qpdf y ghostscript: herramientas PDF
 sudo useradd --system --create-home --shell /usr/sbin/nologin miputer
 sudo useradd --create-home --shell /bin/bash mpclaude && sudo passwd -l mpclaude
 sudo chmod 750 /home/miputer && sudo chmod 700 /home/mpclaude
