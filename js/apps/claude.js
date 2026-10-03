@@ -16,7 +16,11 @@ function loadLibs() {
       import(`${VENDOR}dompurify/purify.es.mjs`),
       import(`${VENDOR}highlight/highlight.min.js`),
     ]);
-    if (!document.querySelector('link[data-hljs]')) document.head.appendChild(Object.assign(document.createElement('link'), { rel: 'stylesheet', href: `${VENDOR}highlight/github-dark.min.css`, dataset: { hljs: '1' } }));
+    if (!document.querySelector('link[data-hljs]')) {
+      const link = Object.assign(document.createElement('link'), { rel: 'stylesheet', href: `${VENDOR}highlight/github-dark.min.css` });
+      link.dataset.hljs = '1';
+      document.head.appendChild(link);
+    }
     // Los enlaces de las respuestas se abren aparte y sin acceso a MiPuter.
     DOMPurify.addHook('afterSanitizeAttributes', (node) => {
       if (node.tagName === 'A') node.setAttribute('target', '_blank'), node.setAttribute('rel', 'noopener noreferrer');
@@ -24,6 +28,7 @@ function loadLibs() {
     marked.setOptions({ gfm: true, breaks: false });
     return { marked, DOMPurify, hljs };
   })();
+  libs.catch(() => (libs = null)); // si falla, se reintenta la próxima vez
   return libs;
 }
 
@@ -170,7 +175,17 @@ export default {
 
     // ---- Pintar mensajes -------------------------------------------------------------
     async function markdown(el, text) {
-      const { marked, DOMPurify, hljs } = await loadLibs();
+      let lib;
+      try {
+        lib = await loadLibs();
+      } catch (e) {
+        // Sin las librerías la respuesta se ve igual, como texto simple.
+        console.error('Claude: no se pudo dar formato a la respuesta', e);
+        el.textContent = text || '';
+        el.style.whiteSpace = 'pre-wrap';
+        return;
+      }
+      const { marked, DOMPurify, hljs } = lib;
       el.innerHTML = DOMPurify.sanitize(marked.parse(text || ''));
       el.querySelectorAll('pre code').forEach((code) => {
         hljs.highlightElement(code);
