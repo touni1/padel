@@ -1,0 +1,32 @@
+# Pantalla virtual del navegador de MiPuter (TigerVNC). Se instala con
+# deploy/setup-web.sh en /etc/systemd/system/miputer-web-x.service.
+#
+# Solo escucha en 127.0.0.1:5905 con contraseña VNC (la usa guacd, de parte de
+# MiPuter). El socket X va a un /tmp privado que solo comparte con Chrome.
+[Unit]
+Description=Pantalla virtual del navegador de MiPuter
+
+[Service]
+Type=simple
+User=mpweb
+Group=mpweb
+Environment=HOME=/home/mpweb
+ExecStart=/usr/bin/Xtigervnc :5 -geometry 1600x900 -depth 24 -localhost -rfbport 5905 -SecurityTypes VncAuth -PasswordFile /etc/miputer-web/vncpasswd -nolisten tcp -nolisten local -AlwaysShared -desktop MiPuter
+Restart=always
+RestartSec=2
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

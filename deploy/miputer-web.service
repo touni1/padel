@@ -1,0 +1,39 @@
+# Google Chrome del navegador de MiPuter, dibujando en la pantalla virtual
+# (miputer-web-x). Se instala con deploy/setup-web.sh.
+#
+# Corre como "mpweb": internet sí, pero no llega a los servicios internos del VPS
+# (nexprop, MiPuter, bases de datos…) ni a redes privadas, y no ve otras carpetas.
+# Si cierras la última pestaña, Chrome se vuelve a abrir solo.
+[Unit]
+Description=Navegador de MiPuter (Google Chrome)
+Requires=miputer-web-x.service
+After=miputer-web-x.service
+JoinsNamespaceOf=miputer-web-x.service
+
+[Service]
+Type=simple
+User=mpweb
+Group=mpweb
+Environment=HOME=/home/mpweb
+Environment=DISPLAY=:5
+Environment=LANG=C.UTF-8
+WorkingDirectory=/home/mpweb
+# Espera a que la pantalla esté lista.
+ExecStartPre=/bin/sh -c 'for i in $(seq 50); do [ -S /tmp/.X11-unix/X5 ] && exit 0; sleep 0.2; done; exit 1'
+ExecStart=/usr/bin/google-chrome-stable --no-first-run --no-default-browser-check --disable-dev-shm-usage --window-position=0,0 --window-size=1600,900 --lang=es-419 --password-store=basic
+Restart=always
+RestartSec=2
+MemoryMax=4G
+
+ProtectSystem=strict
+ReadWritePaths=/home/mpweb
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+InaccessiblePaths=-/home/miputer -/home/mpclaude -/home/ubuntu -/home/jaz -/root -/var/www -/etc/letsencrypt -/etc/nginx -/etc/miputer-web
+IPAddressDeny=127.0.0.0/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 fc00::/7 fe80::/10 149.56.102.163 2607:5300:205:200::a4ea
+IPAddressAllow=127.0.0.53
+
+[Install]
+WantedBy=multi-user.target
