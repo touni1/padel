@@ -29,7 +29,8 @@ function loadLibs() {
 
 const MODES = [
   ['acceptEdits', 'Aceptar ediciones'],
-  ['default', 'Preguntar todo'],
+  ['manual', 'Preguntar todo'],
+  ['auto', 'Automático (Claude decide qué es seguro)'],
   ['bypassPermissions', 'Sin preguntar'],
   ['plan', 'Solo planificar'],
 ];
@@ -121,7 +122,8 @@ export default {
     const modeSel = $('.cc-mode');
     const chips = $('.cc-chips');
     try {
-      modeSel.value = localStorage.getItem(MODE_KEY) || 'acceptEdits';
+      modeSel.value = (localStorage.getItem(MODE_KEY) || 'acceptEdits').replace(/^default$/, 'manual');
+      if (!modeSel.value) modeSel.value = 'acceptEdits';
     } catch {}
 
     let ws = null;

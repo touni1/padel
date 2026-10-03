@@ -15,7 +15,9 @@ import { randomUUID } from 'node:crypto';
 const SOCKET = process.env.CHAT_SOCKET || '/run/miputer-claude-chat/chat.sock';
 const WORKDIR = process.env.CHAT_WORKDIR || join(process.env.HOME, 'trabajo');
 const MAX_CHATS = 3;
-const MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
+// Desde Claude Code 2.1.288 "default" se llama "manual"; se acepta el nombre viejo.
+const MODES = ['manual', 'acceptEdits', 'auto', 'bypassPermissions', 'plan'];
+const modeOf = (m) => (m === 'default' ? 'manual' : MODES.includes(m) ? m : 'acceptEdits');
 // Claude Code guarda cada conversación en ~/.claude/projects/<carpeta con "/" → "-">/<id>.jsonl
 const PROJECT_DIR = join(process.env.HOME, '.claude', 'projects', WORKDIR.replace(/[^a-zA-Z0-9]/g, '-'));
 let running = 0;
@@ -74,7 +76,7 @@ function handle(conn) {
     if (child) return send({ ev: 'error', message: 'La conversación ya está abierta' });
     if (running >= MAX_CHATS) return send({ ev: 'error', message: `Hay ${MAX_CHATS} conversaciones abiertas a la vez: cierra alguna` });
     mkdirSync(WORKDIR, { recursive: true });
-    const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-prompt-tool', 'stdio', '--permission-mode', MODES.includes(mode) ? mode : 'acceptEdits'];
+    const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-prompt-tool', 'stdio', '--permission-mode', modeOf(mode)];
     if (session && /^[\w-]{8,64}$/.test(session)) args.push('--resume', session);
     child = spawn('claude', args, { cwd: WORKDIR, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
     running++;
@@ -154,7 +156,7 @@ function handle(conn) {
       case 'interrupt':
         return control({ subtype: 'interrupt' });
       case 'mode':
-        if (MODES.includes(msg.mode)) control({ subtype: 'set_permission_mode', mode: msg.mode });
+        control({ subtype: 'set_permission_mode', mode: modeOf(msg.mode) });
         return;
     }
   }
