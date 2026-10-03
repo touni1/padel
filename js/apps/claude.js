@@ -76,6 +76,22 @@ function describeTool(name, input = {}) {
       return { icon: '🌐', title: `Buscó en la web: ${short(input.query, 60)}` };
     case 'TodoWrite':
       return { icon: '✅', title: 'Lista de tareas', todos: input.todos || [] };
+    case 'mcp__miputer__miputer_listar':
+      return { icon: '🗂️', title: `Miró ${input.ruta} en MiPuter` };
+    case 'mcp__miputer__miputer_leer':
+      return { icon: '📖', title: `Leyó ${input.ruta} de MiPuter` };
+    case 'mcp__miputer__miputer_escribir':
+      return { icon: '📝', title: `Guardó ${input.ruta} en MiPuter`, code: input.contenido };
+    case 'mcp__miputer__miputer_crear_carpeta':
+      return { icon: '📁', title: `Creó la carpeta ${input.ruta} en MiPuter` };
+    case 'mcp__miputer__miputer_mover':
+      return { icon: '↪️', title: `Movió ${input.origen} → ${input.destino}` };
+    case 'mcp__miputer__miputer_eliminar':
+      return { icon: '🗑️', title: `Mandó ${input.ruta} a la papelera` };
+    case 'mcp__miputer__miputer_guardar':
+      return { icon: '📤', title: `Guardó ${file(input.origen)} en MiPuter: ${input.destino}` };
+    case 'mcp__miputer__miputer_traer':
+      return { icon: '📥', title: `Trajo ${input.ruta} a su carpeta de trabajo` };
     case 'Task':
     case 'Agent':
       return { icon: '🤖', title: `Delegó: ${short(input.description || input.prompt || '', 60)}` };
@@ -368,6 +384,8 @@ export default {
       }
       if (e.ev === 'permission') return permissionCard(e);
       if (e.ev === 'attached') return;
+      // Claude cambió algo en MiPuter: se trae el árbol ya, sin esperar la sincronización.
+      if (e.ev === 'tree-changed') return void fs.syncWithServer();
       if (e.ev === 'error') {
         setBusy(false);
         return notice(escapeHtml(e.message), 'err');

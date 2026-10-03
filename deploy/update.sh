@@ -20,7 +20,7 @@ if changed package.json package-lock.json || [ ! -d "$APP_DIR/node_modules" ]; t
   (cd "$APP_DIR" && as_app npm ci --omit=dev --no-audit --no-fund)
 fi
 
-if changed deploy/miputer.service deploy/miputer-claude.service deploy/tmux.conf deploy/miputer-claude-chat.service deploy/claude-chat-bridge.mjs; then
+if changed deploy/miputer.service deploy/miputer-claude.service deploy/tmux.conf deploy/miputer-claude-chat.service deploy/claude-chat-bridge.mjs deploy/miputer-mcp.mjs; then
   echo "→ Actualizando servicios"
   install -m 644 "$APP_DIR/deploy/miputer.service" /etc/systemd/system/miputer.service
   install -m 644 "$APP_DIR/deploy/miputer-claude.service" /etc/systemd/system/miputer-claude.service
@@ -28,6 +28,7 @@ if changed deploy/miputer.service deploy/miputer-claude.service deploy/tmux.conf
   install -m 644 "$APP_DIR/deploy/miputer-claude-chat.service" /etc/systemd/system/miputer-claude-chat.service
   install -d -m 755 /opt/miputer-claude-chat
   install -m 644 "$APP_DIR/deploy/claude-chat-bridge.mjs" /opt/miputer-claude-chat/bridge.mjs
+  install -m 644 "$APP_DIR/deploy/miputer-mcp.mjs" /opt/miputer-claude-chat/mcp.mjs
   systemctl daemon-reload
   systemctl restart miputer-claude-chat
   echo "  (miputer-claude no se reinicia solo para no cortar sesiones abiertas:"

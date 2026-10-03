@@ -1146,6 +1146,158 @@ async function addFilesToTree(dir, files) {
   return names;
 }
 
+// ---- Archivos de MiPuter para Claude (herramientas miputer_* del chat) ----------
+//
+// Claude no ve el árbol de carpetas: pide operaciones al puente, el puente las
+// pasa por la conexión del chat y aquí se hacen sobre el árbol del servidor y B2.
+// Solo se puede tocar lo que cuelga de "/" (no la papelera salvo para borrar).
+
+const TEXT_EXT = /\.(txt|md|csv|json|js|mjs|ts|py|html?|css|xml|ya?ml|ini|sh|log|sql|php|java|c|cpp|h|go|rs|rb)$/i;
+const CLAUDE_FILE_MAX = 35 * 1024 * 1024; // lo que entra cómodo por la conexión del chat
+const mimeFor = (name) => (TEXT_EXT.test(name) ? 'text/plain; charset=utf-8' : mimeOf(name));
+
+function normTreePath(p) {
+  const parts = treePath(p);
+  if (!parts.length) throw new Error('Indica una ruta dentro de MiPuter, por ejemplo /Escritorio/nota.txt');
+  if (parts[0] === 'Papelera') throw new Error('La papelera no se puede tocar directamente');
+  return parts;
+}
+
+// Cambia el árbol del servidor con `fn(raíz)` y lo guarda como una versión nueva.
+async function mutateTree(fn) {
+  const current = await loadTree();
+  if (!current.tree) throw new Error('El árbol de carpetas todavía no existe');
+  const result = await fn(current.tree);
+  tree = { version: current.version + 1, tree: current.tree, updated: Date.now() };
+  saveTreeFile();
+  scheduleTreeBackup();
+  return result;
+}
+
+function parentOf(root, parts, create) {
+  let node = root;
+  for (const part of parts.slice(0, -1)) {
+    if (node.children[part]?.type !== 'dir') {
+      if (!create) throw new Error(`No existe la carpeta /${parts.slice(0, parts.indexOf(part) + 1).join('/')}`);
+      node.children[part] = { type: 'dir', children: {}, mtime: Date.now() };
+    }
+    node = node.children[part];
+  }
+  return node;
+}
+
+async function writeTreeFile(path, bytes, type) {
+  const parts = normTreePath(path);
+  const name = parts.at(-1);
+  // Si ya existía en B2 se sobrescribe la misma clave: así queda como versión anterior.
+  const existing = (await treeNode(`/${parts.join('/')}`)) || null;
+  if (existing?.type === 'dir') throw new Error(`/${parts.join('/')} es una carpeta`);
+  let remote = null;
+  if (b2.enabled) {
+    const key = existing?.remote?.key || newKey(name);
+    await b2Request('PUT', key, { body: bytes, headers: { 'content-type': type } });
+    removeThumb(key);
+    remote = { key, size: bytes.length, type };
+  }
+  await mutateTree((root) => {
+    const parent = parentOf(root, parts, true);
+    parent.children[name] = remote ? { type: 'file', content: '', remote, mtime: Date.now() } : { type: 'file', content: bytes.toString('utf8'), mtime: Date.now() };
+    parent.mtime = Date.now();
+  });
+  return { ruta: `/${parts.join('/')}`, bytes: bytes.length, reemplazado: Boolean(existing) };
+}
+
+async function readTreeBytes(path, max) {
+  const node = await treeNode(`/${treePath(path).join('/')}`);
+  if (!node) throw new Error(`No existe ${path}`);
+  if (node.type === 'dir') throw new Error(`${path} es una carpeta: usa miputer_listar`);
+  if (node.remote) {
+    if (node.remote.size > max) throw new Error(`Pesa ${human(node.remote.size)}: el máximo es ${human(max)}`);
+    const r = await b2Request('GET', node.remote.key);
+    return { bytes: Buffer.from(await r.arrayBuffer()), type: node.remote.type };
+  }
+  return node.content.startsWith('data:') ? { bytes: decodeData(node.content), type: node.content.slice(5, node.content.indexOf(';')) } : { bytes: Buffer.from(node.content, 'utf8'), type: 'text/plain' };
+}
+
+async function claudeFsAction(action, a = {}) {
+  switch (action) {
+    case 'listar': {
+      const path = `/${treePath(a.ruta || '/').join('/')}`;
+      const node = await treeNode(path);
+      if (node?.type !== 'dir') throw new Error(`No existe la carpeta ${path}`);
+      return Object.entries(node.children).map(([nombre, n]) => ({
+        nombre,
+        tipo: n.type === 'dir' ? 'carpeta' : 'archivo',
+        ...(n.type === 'file' ? { tamaño: n.remote ? n.remote.size : n.content.length } : { elementos: Object.keys(n.children).length }),
+        modificado: new Date(n.mtime).toISOString(),
+      }));
+    }
+    case 'leer': {
+      const { bytes } = await readTreeBytes(a.ruta, 2 * 1024 * 1024);
+      const text = bytes.toString('utf8');
+      if (text.includes('�') || bytes.includes(0)) throw new Error('No es un archivo de texto: usa miputer_traer para copiarlo a tu carpeta de trabajo');
+      return text;
+    }
+    case 'escribir': {
+      const contenido = String(a.contenido ?? '');
+      if (Buffer.byteLength(contenido) > 5 * 1024 * 1024) throw new Error('Demasiado largo (máx. 5 MB): crea el archivo en tu carpeta y usa miputer_guardar');
+      return writeTreeFile(a.ruta, Buffer.from(contenido, 'utf8'), mimeFor(String(a.ruta)));
+    }
+    case 'subir': {
+      const bytes = Buffer.from(String(a.datos || ''), 'base64');
+      if (bytes.length > CLAUDE_FILE_MAX) throw new Error(`Supera ${human(CLAUDE_FILE_MAX)}`);
+      return writeTreeFile(a.ruta, bytes, mimeFor(String(a.ruta)));
+    }
+    case 'bajar': {
+      const { bytes } = await readTreeBytes(a.ruta, CLAUDE_FILE_MAX);
+      return { datos: bytes.toString('base64'), bytes: bytes.length };
+    }
+    case 'crear_carpeta': {
+      const parts = normTreePath(a.ruta);
+      await mutateTree((root) => {
+        const parent = parentOf(root, parts, true);
+        if (parent.children[parts.at(-1)]?.type === 'file') throw new Error('Ya hay un archivo con ese nombre');
+        parent.children[parts.at(-1)] ??= { type: 'dir', children: {}, mtime: Date.now() };
+      });
+      return { ruta: `/${parts.join('/')}` };
+    }
+    case 'mover': {
+      const from = normTreePath(a.origen);
+      const to = normTreePath(a.destino);
+      if (`/${to.join('/')}/`.startsWith(`/${from.join('/')}/`)) throw new Error('No se puede mover una carpeta dentro de sí misma');
+      return mutateTree((root) => {
+        const src = parentOf(root, from, false);
+        const node = src.children[from.at(-1)];
+        if (!node) throw new Error(`No existe /${from.join('/')}`);
+        const dst = parentOf(root, to, true);
+        if (dst.children[to.at(-1)]) throw new Error(`Ya existe /${to.join('/')}`);
+        delete src.children[from.at(-1)];
+        dst.children[to.at(-1)] = node;
+        node.mtime = Date.now();
+        return { de: `/${from.join('/')}`, a: `/${to.join('/')}` };
+      });
+    }
+    case 'eliminar': {
+      // Va a la papelera (se puede restaurar 30 días), igual que al borrar desde MiPuter.
+      const parts = normTreePath(a.ruta);
+      return mutateTree((root) => {
+        const parent = parentOf(root, parts, false);
+        const node = parent.children[parts.at(-1)];
+        if (!node) throw new Error(`No existe /${parts.join('/')}`);
+        root.children.Papelera ??= { type: 'dir', children: {}, mtime: Date.now() };
+        const trash = root.children.Papelera;
+        const name = uniqueChild(trash.children, parts.at(-1));
+        delete parent.children[parts.at(-1)];
+        node.trashed = { from: `/${parts.join('/')}`, at: Date.now() };
+        trash.children[name] = node;
+        return { enPapelera: `/Papelera/${name}` };
+      });
+    }
+  }
+  throw new Error(`Acción desconocida: ${action}`);
+}
+const CLAUDE_FS_MUTATES = new Set(['escribir', 'subir', 'crear_carpeta', 'mover', 'eliminar']);
+
 // Todo lo que cuelga de un nodo, con rutas relativas (para el zip de una carpeta compartida).
 function collectNode(node, rel, out = []) {
   if (node.type === 'dir') {
@@ -1675,9 +1827,26 @@ function handleChatUpgrade(req, socket, head, reject) {
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl);
         buf = buf.slice(nl + 1);
-        if (line && ws.readyState === ws.OPEN) ws.send(line);
+        if (!line) continue;
+        if (line.startsWith('{"ev":"fs"')) {
+          handleClaudeFs(line);
+          continue;
+        }
+        if (ws.readyState === ws.OPEN) ws.send(line);
       }
     });
+    const handleClaudeFs = async (line) => {
+      const { id, action, args } = JSON.parse(line);
+      let reply;
+      try {
+        reply = { op: 'fsresult', id, ok: true, result: await claudeFsAction(action, args) };
+        // La ventana trae el árbol nuevo enseguida (el archivo aparece en el escritorio).
+        if (CLAUDE_FS_MUTATES.has(action) && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ ev: 'tree-changed' }));
+      } catch (e) {
+        reply = { op: 'fsresult', id, ok: false, error: e.message };
+      }
+      if (!bridge.destroyed) bridge.write(`${JSON.stringify(reply)}\n`);
+    };
     const close = () => {
       bridge.destroy();
       if (ws.readyState === ws.OPEN) ws.close();

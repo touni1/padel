@@ -9,12 +9,21 @@
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { readdirSync, statSync, readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, unlinkSync, rmSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 const SOCKET = process.env.CHAT_SOCKET || '/run/miputer-claude-chat/chat.sock';
 const WORKDIR = process.env.CHAT_WORKDIR || join(process.env.HOME, 'trabajo');
 const MAX_CHATS = 3;
+const MCP_SCRIPT = process.env.CHAT_MCP || join(dirname(new URL(import.meta.url).pathname), 'mcp.mjs');
+// Lo que Claude tiene que saber de su entorno: "el escritorio" de la persona es MiPuter.
+const SYSTEM_PROMPT = `Estás integrado en MiPuter, el escritorio web de la persona con la que hablas (lo usa desde el navegador).
+Cuando habla de "el escritorio", "mis archivos", "mis documentos", una carpeta suya o un archivo que ve en pantalla, se refiere a MiPuter (rutas como /Escritorio, /Documentos, /Imágenes), NO a tu carpeta del VPS. Para verlos, leerlos, crearlos, moverlos o borrarlos usa SIEMPRE las herramientas mcp__miputer__* (miputer_listar, miputer_leer, miputer_escribir, miputer_crear_carpeta, miputer_mover, miputer_eliminar, miputer_guardar, miputer_traer).
+Tu carpeta de trabajo (${WORKDIR}) es un espacio privado tuyo en un servidor Linux: úsala para programar, ejecutar y procesar. Si el resultado es para la persona, guárdalo en MiPuter con miputer_escribir o miputer_guardar y dile dónde quedó.
+Los archivos que adjunta desde MiPuter quedan copiados en ${WORKDIR}/adjuntos.
+Responde en el idioma de la persona (normalmente español).`;
+// Leer y listar no piden permiso; crear, cambiar o borrar sí (salvo en modo automático o sin preguntar).
+const READ_ONLY_TOOLS = ['mcp__miputer__miputer_listar', 'mcp__miputer__miputer_leer', 'mcp__miputer__miputer_traer'];
 // Desde Claude Code 2.1.288 "default" se llama "manual"; se acepta el nombre viejo.
 const MODES = ['manual', 'acceptEdits', 'auto', 'bypassPermissions', 'plan'];
 const modeOf = (m) => (m === 'default' ? 'manual' : MODES.includes(m) ? m : 'acceptEdits');
@@ -80,6 +89,26 @@ function history(id) {
 function handle(conn) {
   let child = null;
   let buffer = '';
+  // Socket propio de esta conversación para las herramientas de MiPuter (servidor MCP).
+  const fsSocket = join(dirname(SOCKET), `fs-${randomUUID()}.sock`);
+  const fsWaiting = new Map(); // id hacia MiPuter -> [conexión del MCP, id original]
+  let fsSeq = 0;
+  const fsServer = net.createServer((mcp) => {
+    let mbuf = '';
+    mcp.on('data', (d) => {
+      mbuf += d;
+      let nl;
+      while ((nl = mbuf.indexOf('\n')) >= 0) {
+        const req = JSON.parse(mbuf.slice(0, nl));
+        mbuf = mbuf.slice(nl + 1);
+        const id = ++fsSeq;
+        fsWaiting.set(id, [mcp, req.id]);
+        send({ ev: 'fs', id, action: req.action, args: req.args });
+      }
+    });
+    mcp.on('error', () => {});
+  });
+  fsServer.listen(fsSocket);
   const allowAlways = new Set(); // herramientas permitidas "siempre" en esta conversación
   const pending = new Map(); // request_id -> petición de permiso
   const send = (obj) => conn.writable && conn.write(`${JSON.stringify(obj)}\n`);
@@ -92,6 +121,8 @@ function handle(conn) {
     mkdirSync(WORKDIR, { recursive: true });
     const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-prompt-tool', 'stdio', '--permission-mode', modeOf(mode)];
     if (session && /^[\w-]{8,64}$/.test(session)) args.push('--resume', session);
+    const mcpConfig = { mcpServers: { miputer: { command: process.execPath, args: [MCP_SCRIPT], env: { MIPUTER_FS_SOCKET: fsSocket, HOME: process.env.HOME, CHAT_WORKDIR: WORKDIR } } } };
+    args.push('--mcp-config', JSON.stringify(mcpConfig), '--append-system-prompt', SYSTEM_PROMPT, '--allowedTools', ...READ_ONLY_TOOLS);
     child = spawn('claude', args, { cwd: WORKDIR, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
     running++;
     let stderr = '';
@@ -186,6 +217,15 @@ function handle(conn) {
         saveTitles(t);
         return send({ ev: 'list', items: conversations() });
       }
+      case 'fsresult': {
+        // Respuesta de MiPuter a una herramienta: vuelve al servidor MCP que la pidió.
+        const w = fsWaiting.get(msg.id);
+        if (!w) return;
+        fsWaiting.delete(msg.id);
+        const [mcp, originalId] = w;
+        if (!mcp.destroyed) mcp.write(`${JSON.stringify({ id: originalId, ok: msg.ok, result: msg.result, error: msg.error })}\n`);
+        return;
+      }
       case 'interrupt':
         return control({ subtype: 'interrupt' });
       case 'mode':
@@ -209,8 +249,15 @@ function handle(conn) {
     }
   });
   // Al cerrar la ventana se cierra Claude; la conversación queda guardada para retomarla.
-  conn.on('close', () => child?.kill('SIGTERM'));
-  conn.on('error', () => child?.kill('SIGTERM'));
+  const cleanup = () => {
+    child?.kill('SIGTERM');
+    fsServer.close();
+    try {
+      unlinkSync(fsSocket);
+    } catch {}
+  };
+  conn.on('close', cleanup);
+  conn.on('error', cleanup);
 }
 
 if (existsSync(SOCKET)) unlinkSync(SOCKET);
