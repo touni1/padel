@@ -5,6 +5,7 @@ import * as storage from '../storage.js';
 import { createWindow } from '../wm.js';
 import { thumbUrl } from '../thumbs.js';
 import { formatSize } from '../ui.js';
+import { launch } from '../registry.js';
 
 const EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'avif'];
 
@@ -42,6 +43,7 @@ export default {
         <button data-act="fit" title="Ajustar (0)">Ajustar</button>
         <button data-act="in" title="Acercar (+)">+</button>
         <button data-act="full" title="Pantalla completa (F)">⛶</button>
+        <button data-act="edit" title="Editar esta foto">✏️</button>
         <a class="gallery-dl" title="Descargar">⤓</a>
       </div>`;
     const stage = win.body.querySelector('.gallery-stage');
@@ -70,7 +72,7 @@ export default {
       fit();
       // La miniatura sale al instante mientras llega la foto entera.
       img.classList.add('loading');
-      if (remote?.thumb) img.src = thumbUrl(remote.key);
+      if (remote?.thumb) img.src = thumbUrl(remote.key, fs.stat(p).mtime);
       const full = new Image();
       full.onload = () => {
         if (photos[index] !== p) return;
@@ -108,6 +110,7 @@ export default {
       in: () => zoomBy(1.4),
       out: () => zoomBy(1 / 1.4),
       fit,
+      edit: () => !photos[index].endsWith('.svg') && launch('imgedit', { path: photos[index] }),
       full: () => (document.fullscreenElement ? document.exitFullscreen() : win.body.requestFullscreen?.()),
     };
     win.body.querySelectorAll('[data-act]').forEach((b) => (b.onclick = () => actions[b.dataset.act]()));
@@ -123,7 +126,18 @@ export default {
     );
     img.ondblclick = () => (zoom > 1 ? fit() : zoomBy(2.5));
     stage.onpointerdown = (e) => {
-      if (zoom === 1 || e.target.closest('button')) return;
+      if (e.target.closest('button')) return;
+      // Sin zoom, deslizar el dedo a un lado pasa de foto.
+      if (zoom === 1) {
+        if (e.pointerType !== 'touch') return;
+        const x0 = e.clientX;
+        stage.onpointerup = (ev) => {
+          stage.onpointerup = null;
+          const dx = ev.clientX - x0;
+          if (Math.abs(dx) > 50) show(index + (dx < 0 ? 1 : -1));
+        };
+        return;
+      }
       const start = [e.clientX - pan[0], e.clientY - pan[1]];
       stage.setPointerCapture(e.pointerId);
       stage.onpointermove = (ev) => {

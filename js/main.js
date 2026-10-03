@@ -4,6 +4,7 @@ import * as storage from './storage.js';
 import { renderIcons, folderMenu, moveInto, importDrop } from './fileActions.js';
 import { hideContextMenu, reportError, escapeHtml, toast } from './ui.js';
 import { applySettings } from './apps/settings.js';
+import { isTouch, enableLongPress } from './touch.js';
 
 import files from './apps/files.js';
 import editor from './apps/editor.js';
@@ -19,18 +20,20 @@ import pdf from './apps/pdf.js';
 import search from './apps/search.js';
 import player from './apps/player.js';
 import office from './apps/office.js';
+import imgedit from './apps/imgedit.js';
 import notes, { renderNotes, newNote } from './apps/notes.js';
 import calendar, { checkReminders } from './apps/calendar.js';
 
 const DESKTOP_DIR = '/Escritorio';
 
-[files, search, editor, terminal, claude, calculator, browser, viewer, pdf, player, office, calendar, notes, settings, shares, trash].forEach(register);
+[files, search, editor, terminal, claude, calculator, browser, viewer, imgedit, pdf, player, office, calendar, notes, settings, shares, trash].forEach(register);
 
 function appIcon(app) {
   const el = document.createElement('div');
   el.className = 'icon';
   el.innerHTML = `<span class="glyph">${app.glyph}</span><span>${escapeHtml(app.name)}</span>`;
   el.ondblclick = () => launch(app.id);
+  if (isTouch()) el.onclick = () => launch(app.id); // en pantallas táctiles, un toque abre
   if (app.onDrop) {
     el.ondragover = (e) => e.preventDefault();
     el.ondrop = (e) => {
@@ -129,6 +132,7 @@ function wireDesktop() {
   });
 }
 
+enableLongPress();
 applySettings();
 renderDesktop();
 renderStartMenu();

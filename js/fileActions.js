@@ -1,10 +1,11 @@
 // Acciones de archivos compartidas por el escritorio y el explorador.
 import * as fs from './fs.js';
-import { openPath, glyphFor } from './registry.js';
+import { openPath, glyphFor, launch } from './registry.js';
 import * as storage from './storage.js';
 import { prompt, confirm, alert, contextMenu, reportError, escapeHtml, toast } from './ui.js';
 import { shareFile } from './apps/shares.js';
 import { canThumb, makeThumb, uploadThumb, ensureThumb, thumbUrl } from './thumbs.js';
+import { isTouch } from './touch.js';
 
 export async function newFolder(dir) {
   const name = await prompt('Nueva carpeta', 'Nombre de la carpeta:', fs.uniqueName(dir, 'Nueva carpeta'));
@@ -235,6 +236,7 @@ export function entryMenu(e, path) {
     { label: 'Duplicar', action: () => duplicateEntry(path) },
   ];
   if (!fs.isDir(path)) items.push({ label: 'Descargar', action: () => download(path) });
+  if (/^(jpe?g|png|webp|gif|bmp)$/.test(fs.extname(path)) && !path.startsWith(fs.TRASH + '/')) items.push({ label: 'Editar imagen', action: () => reportError(() => launch('imgedit', { path })) });
   if (!fs.isDir(path) && !path.startsWith(fs.TRASH + '/') && storage.enabled()) items.push({ label: 'Compartir enlace…', action: () => shareFile(path) });
   if (!path.startsWith(fs.TRASH + '/') && storage.enabled()) {
     items.push('sep', { label: 'Comprimir en ZIP', action: () => compressEntry(path) });
@@ -266,7 +268,7 @@ export function renderIcons(container, dir, { onOpen = openPath } = {}) {
     el.innerHTML = `<span class="glyph">${glyphFor(entry)}</span><span>${escapeHtml(entry.name)}</span>`;
     // Fotos y vídeos: su miniatura en vez del icono.
     if (entry.remote?.thumb) {
-      const img = Object.assign(document.createElement('img'), { className: 'thumb', src: thumbUrl(entry.remote.key), loading: 'lazy', alt: '' });
+      const img = Object.assign(document.createElement('img'), { className: 'thumb', src: thumbUrl(entry.remote.key, entry.mtime), loading: 'lazy', alt: '' });
       img.onerror = () => img.replaceWith(Object.assign(document.createElement('span'), { className: 'glyph', textContent: glyphFor(entry) }));
       el.querySelector('.glyph').replaceWith(img);
     } else if (entry.remote && canThumb(entry.name)) {
@@ -283,6 +285,7 @@ export function renderIcons(container, dir, { onOpen = openPath } = {}) {
       el.classList.add('selected');
     };
     el.ondblclick = () => onOpen(entry.path, entry);
+    if (isTouch()) el.onclick = () => onOpen(entry.path, entry); // en pantallas táctiles, un toque abre
     el.oncontextmenu = (e) => entryMenu(e, entry.path);
     el.ondragstart = (e) => e.dataTransfer.setData('text/x-miputer-path', entry.path);
     if (entry.type === 'dir') {

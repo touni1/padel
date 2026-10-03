@@ -1,4 +1,5 @@
 // Gestor de ventanas: crear, arrastrar, redimensionar, minimizar, maximizar y barra de tareas.
+import { isNarrow } from './touch.js';
 
 const windowsEl = () => document.getElementById('windows');
 const taskListEl = () => document.getElementById('task-list');
@@ -34,6 +35,8 @@ export function createWindow({ title = 'Ventana', width = 640, height = 440, onC
     <div class="window-body"></div>
     <div class="resize-handle"></div>`;
   windowsEl().appendChild(el);
+  // En el celular las ventanas van siempre a pantalla completa.
+  if (isNarrow()) el.classList.add('maximized');
 
   const task = document.createElement('button');
   task.className = 'task';
@@ -63,6 +66,7 @@ export function createWindow({ title = 'Ventana', width = 640, height = 440, onC
       task.classList.remove('active');
     },
     toggleMaximize() {
+      if (isNarrow()) return;
       el.classList.toggle('maximized');
     },
     async close() {

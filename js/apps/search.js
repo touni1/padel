@@ -4,6 +4,7 @@ import { createWindow } from '../wm.js';
 import { openPath, launch, glyphFor } from '../registry.js';
 import { entryMenu } from '../fileActions.js';
 import { formatSize } from '../ui.js';
+import { isTouch } from '../touch.js';
 
 const when = (ms) => new Date(ms).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' });
 
@@ -42,6 +43,7 @@ export default {
         row.querySelector('small').textContent = `${fs.dirname(item.path)} · ${when(item.mtime)}`;
         row.querySelector('.search-size').textContent = item.type === 'dir' ? `${item.size} elementos` : `${item.remote ? '☁ ' : ''}${formatSize(item.size)}`;
         row.ondblclick = () => (item.type === 'dir' ? launch('files', { path: item.path }) : openPath(item.path));
+        if (isTouch()) row.onclick = row.ondblclick;
         row.oncontextmenu = (e) => entryMenu(e, item.path);
         row.title = 'Doble clic para abrir · clic derecho para más opciones';
         results.appendChild(row);

@@ -375,11 +375,18 @@ function b2RangeStream(key, start, end) {
 async function sendB2File(req, res, key, extra = {}) {
   const head = await b2Request('HEAD', key);
   const size = Number(head.headers.get('content-length')) || 0;
+  const etag = head.headers.get('etag');
   const headers = {
     'content-type': head.headers.get('content-type') || 'application/octet-stream',
     'accept-ranges': 'bytes',
+    ...(etag ? { etag } : {}),
     ...extra,
   };
+  // El navegador pregunta si su copia sigue valiendo: si no cambió, no se baja nada de B2.
+  if (etag && req.headers['if-none-match'] === etag && !req.headers.range) {
+    res.writeHead(304, { etag, 'cache-control': headers['cache-control'] || 'no-cache' });
+    return res.end();
+  }
   let [start, end] = [0, size];
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
   if (range && size) {
@@ -1279,7 +1286,9 @@ async function handleApi(req, res, url) {
 
     // Leer: GET /api/files?key=...[&download=nombre]
     if (method === 'GET' || method === 'HEAD') {
-      const extra = { 'cache-control': 'private, max-age=3600' };
+      // no-cache = el navegador guarda la copia pero pregunta antes de usarla (ver ETag en sendB2File):
+      // así un archivo editado (misma clave) nunca se ve desactualizado.
+      const extra = { 'cache-control': 'private, no-cache' };
       const download = url.searchParams.get('download');
       if (download) extra['content-disposition'] = `attachment; filename*=UTF-8''${encodeRfc3986(download)}`;
       return sendB2File(req, res, key, extra);

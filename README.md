@@ -16,6 +16,7 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 - **Sin buscadores ni robots**: `robots.txt` lo prohíbe todo, todas las respuestas llevan `X-Robots-Tag: noindex` y los bots conocidos (buscadores, IA, SEO) reciben 403.
 - **Carpetas enteras**: arrastrarlas desde el ordenador o *Subir carpeta…* las sube con sus subcarpetas (de a 3 archivos a la vez, con un solo aviso de progreso). En Ajustes se ve el **espacio usado** por carpeta.
 - Las lecturas de B2 van en tramos de 32 MB pedidos por adelantado, nunca con una conexión larga (B2 corta las que quedan frenadas): así funcionan las descargas lentas, reanudar (`Range`), adelantar vídeos, comprimir y extraer.
+- **Celular**: las ventanas van a pantalla completa, un toque abre, mantener pulsado hace de clic derecho (también en iPhone) y en la galería se desliza para pasar fotos.
 - Subida de archivos desde tu ordenador (botón ⤒ o arrastrándolos al escritorio o al explorador) y descarga.
 - **Archivos subidos guardados en Backblaze B2** (llevan una nube ☁ en el icono). Se pueden abrir, editar, duplicar, descargar y borrar; los cambios se aplican también en B2.
 
@@ -31,6 +32,7 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 | 🌐 Navegador | Navega URLs en un iframe o muestra archivos `.html` del sistema virtual |
 | 🖼️ Fotos | Galería de la carpeta: flechas, zoom con la rueda, arrastrar, pantalla completa. Las fotos y vídeos tienen miniatura (hecha al subir, guardada en el servidor) |
 | 📘 Documentos | Ver Word (.docx) y hojas de cálculo (.xlsx, .xls, .ods, con pestañas por hoja) sin descargarlos. Solo lectura, en un iframe aislado sin scripts (mammoth y SheetJS en `js/vendor/`) |
+| 🎨 Editor de imágenes | Clic derecho en una foto → *Editar imagen* (o ✏️ en la galería): rotar, voltear, recortar, cambiar tamaño, brillo, contraste y saturación |
 | 🎵 Reproductor | Música y vídeo de la carpeta como lista: siguiente automático, aleatorio, repetir, teclas multimedia; sigue sonando minimizado |
 | 📕 Editor de PDF | Texto, resaltar, tapar, dibujar y firmar; rellenar formularios; rotar, mover y borrar páginas; unir PDFs. Guarda sobre el archivo o como copia (pdf.js + pdf-lib, en `js/vendor/`) |
 | 🔍 Buscar | Busca archivos y carpetas por nombre en todo MiPuter, sin distinguir mayúsculas ni acentos |

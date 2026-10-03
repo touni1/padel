@@ -10,7 +10,9 @@ const LAZY_MAX_BYTES = 25 * 1024 * 1024; // más grande que esto no se descarga 
 const IMAGE = /\.(png|jpe?g|gif|webp|bmp|avif|heic)$/i;
 const VIDEO = /\.(mp4|webm|mov|m4v)$/i;
 
-export const thumbUrl = (key) => `api/thumbs?key=${encodeURIComponent(key)}`;
+// `v` (la fecha de modificación) cambia la dirección cuando el archivo se edita: la miniatura vieja
+// queda en la caché del navegador pero ya no se pide.
+export const thumbUrl = (key, v = '') => `api/thumbs?key=${encodeURIComponent(key)}${v ? `&v=${v}` : ''}`;
 export const canThumb = (name) => IMAGE.test(name) || VIDEO.test(name);
 
 function toBlob(canvas) {
