@@ -525,11 +525,12 @@ function attachClaude(ws, slot, cols, rows) {
 function handleUpgrade(req, socket, head) {
   const reject = (status) => socket.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\nConnection: close\r\n\r\n`);
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname !== '/api/pty' && url.pathname !== '/api/rdp') return reject(404);
+  if (!['/api/pty', '/api/rdp', '/api/claude-chat'].includes(url.pathname)) return reject(404);
   if (!auth.enabled || !isAuthenticated(req)) return reject(401);
   if (auth.mustChange) return reject(403);
   if (!sameOrigin(req)) return reject(403);
   if (url.pathname === '/api/rdp') return handleRdpUpgrade(req, socket, head, url, reject);
+  if (url.pathname === '/api/claude-chat') return handleChatUpgrade(req, socket, head, reject);
   if (!claudeEnabled()) return reject(404);
   const slot = Number(url.searchParams.get('slot'));
   if (!Number.isInteger(slot) || slot < 1 || slot > CLAUDE_MAX) return reject(400);
@@ -1649,6 +1650,54 @@ async function handleB2Config(req, res) {
   Object.assign(b2, cfg, { source: 'ajustes' });
   console.log(`Subidas → Backblaze B2 (bucket "${b2.bucket}", región ${b2.region}) — configurado desde Ajustes`);
   return sendJson(res, 200, { ok: true, bucket: b2.bucket });
+}
+
+// ---------------------------------------------------------------------------
+// App Claude en modo chat (/api/claude-chat)
+// ---------------------------------------------------------------------------
+//
+// MiPuter no lanza Claude: pasa mensajes entre la ventana y el puente que corre
+// como mpclaude (servicio miputer-claude-chat), por su socket local. Solo deja
+// pasar las órdenes conocidas.
+
+const CHAT_SOCKET = process.env.CLAUDE_CHAT_SOCKET || '/run/miputer-claude-chat/chat.sock';
+const CHAT_OPS = new Set(['list', 'history', 'start', 'send', 'attach', 'permission', 'interrupt', 'mode']);
+const chatWss = WebSocketServer ? new WebSocketServer({ noServer: true, maxPayload: 40 * 1024 * 1024 }) : null;
+
+function handleChatUpgrade(req, socket, head, reject) {
+  if (!chatWss || !existsSync(CHAT_SOCKET)) return reject(503);
+  chatWss.handleUpgrade(req, socket, head, (ws) => {
+    const bridge = net.connect(CHAT_SOCKET);
+    let buf = '';
+    bridge.on('data', (d) => {
+      buf += d;
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line && ws.readyState === ws.OPEN) ws.send(line);
+      }
+    });
+    const close = () => {
+      bridge.destroy();
+      if (ws.readyState === ws.OPEN) ws.close();
+    };
+    bridge.on('error', (e) => {
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ ev: 'error', message: `No se pudo hablar con Claude (${e.code || e.message})` }));
+      close();
+    });
+    bridge.on('close', close);
+    ws.on('message', (data) => {
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      if (CHAT_OPS.has(msg?.op)) bridge.write(`${JSON.stringify(msg)}\n`);
+    });
+    ws.on('close', close);
+  });
 }
 
 // ---------------------------------------------------------------------------

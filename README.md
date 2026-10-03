@@ -31,7 +31,7 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 | 🗂️ Archivos | Explorador con navegación, ruta editable, historial y arrastrar a carpetas |
 | 📝 Editor de texto | Abre/guarda `.txt`, `.md`, `.js`… (`Ctrl+S`), avisa de cambios sin guardar |
 | 💻 Terminal | `ls`, `cd`, `cat`, `echo > archivo`, `mkdir`, `rm`, `mv`, `cp`, `open`, `neofetch`… |
-| ✳️ Claude | Terminal **real** del servidor con [Claude Code](https://claude.com/claude-code) (ver [App Claude](#app-claude)) |
+| ✳️ Claude | Chat con [Claude Code](https://claude.com/claude-code) al estilo Claude Desktop: Markdown, código con colores, lo que hace Claude en tarjetas, permisos con botones, historial y adjuntos de MiPuter. La terminal real sigue en *Abrir la terminal* (ver [App Claude](#app-claude)) |
 | 🧮 Calculadora | Con paréntesis y soporte de teclado (sin `eval`) |
 | 🌐 Navegador | Navega URLs en un iframe o muestra archivos `.html` del sistema virtual |
 | 🖼️ Fotos | Galería de la carpeta: flechas, zoom con la rueda, arrastrar, pantalla completa. Las fotos y vídeos tienen miniatura (hecha al subir, guardada en el servidor) |
@@ -174,6 +174,8 @@ navegador ──wss /api/pty──▶ server.js (usuario miputer)
 - xterm.js se carga desde jsDelivr con hash de integridad (SRI).
 
 > ⚠️ **Riesgos.** Quien entre en MiPuter tiene un shell en el servidor como `mpclaude`, y Claude puede ejecutar comandos ahí. La contraseña de MiPuter pasa a proteger también eso, así que usa una larga y única. `mpclaude` tiene salida a internet y puede leer lo que sea legible para cualquier usuario del sistema. Además, la cuenta de Claude con la que inicies sesión queda guardada en `/home/mpclaude/.claude`.
+
+**El chat** usa el mismo Claude Code en modo sin pantalla (`claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio`). Lo lanza un puente que corre como `mpclaude` (servicio `miputer-claude-chat`, script en `/opt/miputer-claude-chat/bridge.mjs`, mismo aislamiento que la terminal) y escucha en `/run/miputer-claude-chat/chat.sock`; MiPuter solo pasa mensajes por `/api/claude-chat`. Los permisos que pide Claude aparecen como tarjetas con *Permitir* / *Rechazar*; las conversaciones las guarda Claude Code y se retoman desde la barra lateral.
 
 **Activarla:** instala las dependencias (`npm ci`) y define en `.env` `CLAUDE_TMUX_SOCKET` y `CLAUDE_WORKDIR` (ver `.env.example`). El resto está en el apartado siguiente.
 

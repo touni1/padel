@@ -1,0 +1,44 @@
+# Puente del chat de Claude (app Claude de MiPuter). Se instala en
+# /etc/systemd/system/miputer-claude-chat.service y el script en
+# /opt/miputer-claude-chat/bridge.mjs.
+#
+# Corre como "mpclaude" (sin sudo), igual que la terminal de Claude: MiPuter solo
+# habla con él por un socket local que puede abrir porque está en el grupo mpclaude.
+[Unit]
+Description=Chat de Claude Code para MiPuter (puente)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=mpclaude
+Group=mpclaude
+RuntimeDirectory=miputer-claude-chat
+RuntimeDirectoryMode=0750
+WorkingDirectory=/home/mpclaude/trabajo
+Environment=HOME=/home/mpclaude
+Environment=PATH=/home/mpclaude/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LANG=C.UTF-8
+Environment=CHAT_SOCKET=/run/miputer-claude-chat/chat.sock
+ExecStart=/usr/bin/node /opt/miputer-claude-chat/bridge.mjs
+Restart=always
+RestartSec=3
+
+# Mismo encierro que la terminal: solo escribe en su carpeta, no ve las otras
+# apps ni llega a los servicios internos del VPS (internet sí).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/mpclaude
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+InaccessiblePaths=-/home/miputer -/home/ubuntu -/home/jaz -/root -/var/www -/etc/letsencrypt -/etc/nginx
+IPAddressDeny=127.0.0.0/8 ::1 149.56.102.163 2607:5300:205:200::a4ea
+IPAddressAllow=127.0.0.53
+
+[Install]
+WantedBy=multi-user.target

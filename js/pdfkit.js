@@ -40,12 +40,12 @@ export async function readBytes(path) {
   return new Uint8Array(await res.arrayBuffer());
 }
 
-// Todos los archivos con esas extensiones (fuera de la papelera).
+// Todos los archivos con esas extensiones, o todos si `exts` es null (fuera de la papelera).
 export function allFiles(exts, dir = '/', out = []) {
   for (const e of fs.readdir(dir)) {
     if (e.path === fs.TRASH) continue;
     if (e.type === 'dir') allFiles(exts, e.path, out);
-    else if (exts.includes(fs.extname(e.name))) out.push(e.path);
+    else if (!exts || exts.includes(fs.extname(e.name))) out.push(e.path);
   }
   return out;
 }
@@ -59,7 +59,7 @@ export function pickFiles({ title, exts, multiple = false, exclude = [] }) {
     const win = createWindow({ title, width: 460, height: 420, onClose: () => resolve(result) });
     win.body.innerHTML = `
       <div class="app-fill">
-        <div class="pick-list grow">${list.length ? '' : `<p class="pick-empty">No hay archivos ${exts.map((e) => `.${e}`).join(', ')} en tu MiPuter.</p>`}</div>
+        <div class="pick-list grow">${list.length ? '' : `<p class="pick-empty">No hay archivos ${exts ? exts.map((e) => `.${e}`).join(', ') : ''} en tu MiPuter.</p>`}</div>
         ${multiple ? '<div class="toolbar pick-bar"><span class="pick-count">Marca los archivos en el orden que quieras</span><span class="spacer"></span><button class="btn primary" disabled>Usar</button></div>' : ''}
       </div>`;
     const box = win.body.querySelector('.pick-list');
