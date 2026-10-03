@@ -794,3 +794,10 @@ button.btn.primary { background: var(--accent); border-color: var(--accent); col
   .cc-hint { display: none; }
   .cc-msgs { padding: 14px 12px 24px; }
 }
+
+/* Navegador (Chrome del servidor) */
+.window-body.web { position: relative; }
+.web-count { background: var(--accent, #3b82f6); color: #fff; border-radius: 9px; padding: 0 6px; font-size: 11px; margin-left: 2px; }
+.web-downloads { position: absolute; top: 44px; right: 8px; width: min(440px, calc(100% - 16px)); max-height: calc(100% - 56px); overflow: auto; background: var(--surface); color: var(--text, #1c2230); border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.4); padding: 12px; display: grid; gap: 8px; align-content: start; z-index: 5; }
+.web-downloads-head { display: flex; justify-content: space-between; align-items: center; }
+.web-downloads p { margin: 0; font-size: 13px; }

@@ -18,7 +18,7 @@ Environment=NODE_ENV=production
 # salvo su carpeta, /tmp privado y sin acceso al kernel.
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/home/miputer
+ReadWritePaths=/home/miputer -/home/mpweb/Descargas -/home/mpweb/MiPuter
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes

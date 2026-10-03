@@ -7,7 +7,7 @@ import { isTouch } from '../touch.js';
 
 const VENDOR = new URL('../vendor/', import.meta.url).href;
 let libPromise;
-function loadGuacamole() {
+export function loadGuacamole() {
   libPromise ??= new Promise((resolve, reject) => {
     const el = Object.assign(document.createElement('script'), { src: `${VENDOR}guacamole/guacamole-common.js`, onload: () => resolve(window.Guacamole) });
     el.onerror = () => {

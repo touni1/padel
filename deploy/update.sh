@@ -35,6 +35,14 @@ if changed deploy/miputer.service deploy/miputer-claude.service deploy/tmux.conf
   echo "   sudo systemctl restart miputer-claude)"
 fi
 
+# Navegador (solo si ya se instaló con deploy/setup-web.sh).
+if [ -f /etc/systemd/system/miputer-web.service ] && changed deploy/miputer-web.service deploy/miputer-web-x.service; then
+  echo "→ Actualizando el navegador"
+  install -m 644 "$APP_DIR/deploy/miputer-web-x.service" "$APP_DIR/deploy/miputer-web.service" /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl restart miputer-web-x miputer-web
+fi
+
 systemctl restart miputer
 sleep 2
 systemctl is-active --quiet miputer && echo "✓ MiPuter actualizado a $(as_app git -C "$APP_DIR" log -1 --format='%h %s')" \

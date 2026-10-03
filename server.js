@@ -8,7 +8,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, createReadStream, createWriteStream, statSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, copyFileSync } from 'node:fs';
+import { existsSync, createReadStream, createWriteStream, statSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, copyFileSync, openSync, fstatSync, closeSync, readdirSync, lstatSync, constants as fsConstants } from 'node:fs';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable, Transform } from 'node:stream';
@@ -578,11 +578,12 @@ function attachClaude(ws, slot, cols, rows) {
 function handleUpgrade(req, socket, head) {
   const reject = (status) => socket.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\nConnection: close\r\n\r\n`);
   const url = new URL(req.url, 'http://localhost');
-  if (!['/api/pty', '/api/rdp', '/api/claude-chat'].includes(url.pathname)) return reject(404);
+  if (!['/api/pty', '/api/rdp', '/api/web', '/api/claude-chat'].includes(url.pathname)) return reject(404);
   if (!auth.enabled || !isAuthenticated(req)) return reject(401);
   if (auth.mustChange) return reject(403);
   if (!sameOrigin(req)) return reject(403);
   if (url.pathname === '/api/rdp') return handleRdpUpgrade(req, socket, head, url, reject);
+  if (url.pathname === '/api/web') return handleWebUpgrade(req, socket, head, reject);
   if (url.pathname === '/api/claude-chat') return handleChatUpgrade(req, socket, head, reject);
   if (!claudeEnabled()) return reject(404);
   const slot = Number(url.searchParams.get('slot'));
@@ -1988,20 +1989,20 @@ function rdpParams(q) {
   };
 }
 
-function attachRdp(ws, q) {
+function attachRdp(ws, q, protocol = 'rdp', params = rdpParams(q), clients = rdpClients) {
   const guacd = net.connect(4822, '127.0.0.1');
   const decoder = new StringDecoder('utf8');
   let buffer = '';
   let ready = false;
   const close = () => {
-    rdpClients.delete(ws);
+    clients.delete(ws);
     guacd.destroy();
     if (ws.readyState === ws.OPEN) ws.close();
   };
   // El cliente de Guacamole espera primero el identificador del túnel.
   ws.send(guacEncode('', crypto.randomUUID()));
 
-  guacd.on('connect', () => guacd.write(guacEncode('select', 'rdp')));
+  guacd.on('connect', () => guacd.write(guacEncode('select', protocol)));
   guacd.on('data', (chunk) => {
     let parsed;
     try {
@@ -2018,7 +2019,6 @@ function attachRdp(ws, q) {
     for (const [opcode, ...args] of parsed.instructions) {
       if (opcode === 'args') {
         // Saludo: tamaño de pantalla, formatos que entiende el navegador y datos de conexión.
-        const params = rdpParams(q);
         guacd.write(guacEncode('size', q.width, q.height, q.dpi));
         guacd.write(guacEncode('audio', 'audio/L8', 'audio/L16'));
         guacd.write(guacEncode('video'));
@@ -2073,6 +2073,162 @@ function handleRdpUpgrade(req, socket, head, url, reject) {
     rdpClients.add(ws);
     attachRdp(ws, q);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Navegador: Google Chrome corriendo en el VPS (/api/web)
+// ---------------------------------------------------------------------------
+//
+// Chrome dibuja en una pantalla virtual (TigerVNC, 127.0.0.1:5905, usuario mpweb)
+// y se muestra con el mismo túnel de Guacamole que Windows, pero por VNC. Lo que
+// baja Chrome queda en /home/mpweb/Descargas y desde aquí se pasa a tus carpetas;
+// para subir algo a una web se deja en /home/mpweb/MiPuter.
+//
+// mpweb es otro usuario: sus archivos se abren sin seguir enlaces simbólicos, para
+// que no pueda hacer que MiPuter lea o pise archivos propios.
+
+const WEB_FILE = join(ROOT, '.web.json');
+const WEB_DOWNLOADS = '/home/mpweb/Descargas';
+const WEB_INBOX = '/home/mpweb/MiPuter';
+const WEB_MAX = 3;
+const webClients = new Set();
+const webConfig = () => {
+  try {
+    return JSON.parse(readFileSync(WEB_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+};
+const webName = (name) => {
+  const n = String(name || '');
+  if (!n || n.length > 200 || /[\/\x00-\x1f]/.test(n) || n.startsWith('.')) throw Object.assign(new Error('Nombre de archivo no válido'), { status: 400 });
+  return n;
+};
+
+function handleWebUpgrade(req, socket, head, reject) {
+  const cfg = webConfig();
+  if (!cfg || !WebSocketServer) return reject(404);
+  if (webClients.size >= WEB_MAX) return reject(429);
+  const placeholder = {};
+  webClients.add(placeholder);
+  rdpWss.handleUpgrade(req, socket, head, (ws) => {
+    webClients.delete(placeholder);
+    webClients.add(ws);
+    const params = { hostname: cfg.host, port: String(cfg.port), password: cfg.password, 'color-depth': '24', 'clipboard-encoding': 'UTF-8' };
+    attachRdp(ws, { width: 1600, height: 900, dpi: 96 }, 'vnc', params, webClients);
+  });
+}
+
+function listWebDownloads() {
+  let names = [];
+  try {
+    names = readdirSync(WEB_DOWNLOADS);
+  } catch {}
+  const files = [];
+  for (const name of names) {
+    if (name.startsWith('.') || /\.(crdownload|tmp)$/i.test(name)) continue;
+    try {
+      const st = lstatSync(join(WEB_DOWNLOADS, name));
+      if (st.isFile()) files.push({ name, size: st.size, mtime: st.mtimeMs });
+    } catch {}
+  }
+  return files.sort((a, b) => b.mtime - a.mtime);
+}
+
+async function handleWebApi(req, res, url) {
+  const route = url.pathname;
+  if (route === '/api/web' && req.method === 'GET') return sendJson(res, 200, { installed: Boolean(webConfig()), files: listWebDownloads() });
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Método no permitido' });
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  let input;
+  try {
+    input = JSON.parse((await readBody(req, 1024 * 1024)).toString());
+  } catch {
+    return sendJson(res, 400, { error: 'Datos no válidos' });
+  }
+  try {
+    if (route === '/api/web/delete') {
+      unlinkSync(join(WEB_DOWNLOADS, webName(input.name)));
+      return sendJson(res, 200, { ok: true });
+    }
+    if (route === '/api/web/save') {
+      // Descargas del navegador → B2 (y el navegador lo agrega a la carpeta que elijas).
+      if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
+      const name = webName(input.name);
+      const file = join(WEB_DOWNLOADS, name);
+      const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      const st = fstatSync(fd);
+      if (!st.isFile()) {
+        closeSync(fd);
+        throw Object.assign(new Error('No es un archivo'), { status: 400 });
+      }
+      if (st.size > MAX_UPLOAD_BYTES) {
+        closeSync(fd);
+        throw Object.assign(new Error(`Pesa ${human(st.size)}: el límite es ${human(MAX_UPLOAD_BYTES)}`), { status: 400 });
+      }
+      const id = startJob(async (job) => {
+        let read = 0;
+        const stream = createReadStream(null, { fd });
+        stream.on('data', (c) => (job.progress = Math.min(0.99, (read += c.length) / (st.size || 1))));
+        const type = mimeOf(name);
+        const key = newKey(name);
+        const size = await streamToB2(stream, key, type);
+        if (input.move !== false) {
+          try {
+            unlinkSync(file);
+          } catch {}
+        }
+        return { key, size, type, name };
+      });
+      return sendJson(res, 202, { job: id });
+    }
+    if (route === '/api/web/send') {
+      // Un archivo de MiPuter → /home/mpweb/MiPuter, para elegirlo en Chrome al subir algo a una web.
+      const name = webName(input.name);
+      // "wx" no abre nada que ya exista (ni un enlace simbólico puesto ahí).
+      const dest = freeName(WEB_INBOX, name);
+      if (typeof input.text === 'string') {
+        writeFileSync(dest, input.text, { flag: 'wx', mode: 0o664 });
+        return sendJson(res, 200, { path: dest, name: dest.split('/').pop() });
+      }
+      const key = checkKey(input.key);
+      const size = Number(input.size) || 0;
+      const id = startJob(async (job) => {
+        const out = createWriteStream(dest, { flags: 'wx', mode: 0o664 });
+        let read = 0;
+        const counter = new Transform({
+          transform(chunk, _, done) {
+            read += chunk.length;
+            if (size) job.progress = Math.min(0.99, read / size);
+            done(null, chunk);
+          },
+        });
+        const source = size ? b2RangeStream(key, 0, size) : Readable.fromWeb((await b2Request('GET', key)).body);
+        await pipeline(source, counter, out);
+        return { name: dest.split('/').pop() };
+      });
+      return sendJson(res, 202, { job: id });
+    }
+  } catch (e) {
+    return sendJson(res, e.status || (e.code === 'ENOENT' ? 404 : e.code === 'ELOOP' ? 400 : 500), { error: e.code === 'ENOENT' ? 'Ese archivo ya no está' : e.message });
+  }
+  return sendJson(res, 404, { error: 'No encontrado' });
+}
+
+const lstatExists = (p) => {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// "foto.jpg" → "foto (1).jpg" si ya existe (incluye enlaces rotos: no se sigue ninguno).
+function freeName(dir, name) {
+  let candidate = join(dir, name);
+  for (let i = 1; lstatExists(candidate); i++) candidate = join(dir, name.replace(/(\.[^.]*)?$/, ` (${i})$1`));
+  return candidate;
 }
 
 async function handleWindowsConfig(req, res) {
@@ -2156,6 +2312,7 @@ async function handleApi(req, res, url) {
   if (route === '/api/versions') return handleVersions(req, res, url);
   if (route === '/api/fetch-url' && method === 'POST') return handleFetchUrl(req, res);
   if (route === '/api/windows-config') return handleWindowsConfig(req, res);
+  if (route === '/api/web' || route.startsWith('/api/web/')) return handleWebApi(req, res, url);
   if (route === '/api/zip' || route === '/api/unzip' || route === '/api/jobs') return handleZipApi(req, res, url);
   if (route === '/api/pdf' && method === 'POST') return handlePdfOps(req, res);
   if (route.startsWith('/api/uploads')) {
