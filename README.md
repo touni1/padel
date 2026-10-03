@@ -60,7 +60,7 @@ npm start
 
 ### Contraseña
 
-Define `MIPUTER_PASSWORD` en `.env` y MiPuter pedirá esa contraseña antes de mostrar nada (la web, los archivos y la API quedan protegidos). La sesión dura 30 días (`SESSION_DAYS`), y se cierra desde **Inicio → Cerrar sesión**. Al cambiar la contraseña se cierran todas las sesiones abiertas. Tras 5 intentos fallidos seguidos, esa IP queda bloqueada 15 minutos.
+Define `MIPUTER_PASSWORD` en `.env` y MiPuter pedirá esa contraseña antes de mostrar nada (la web, los archivos y la API quedan protegidos). La sesión dura 30 días (`SESSION_DAYS`), y se cierra desde **Inicio → Cerrar sesión**. Al cambiar la contraseña se cierran todas las sesiones abiertas. Tras 3 contraseñas incorrectas seguidas, esa IP (o su /64 en IPv6) queda bloqueada; cada bloqueo nuevo dura más: 15 min, 1 h, 6 h y 24 h. El historial se guarda en `data/intentos-login.json` (sobrevive a reinicios) y se olvida tras 24 h sin fallos. Para desbloquear a mano: borra ese archivo y reinicia `miputer`.
 
 Se cambia desde **Inicio → Cambiar contraseña** (`/cambiar-clave`; mínimo 12 caracteres). La nueva se guarda como hash scrypt en `.password.json` (600), que **tiene prioridad sobre `MIPUTER_PASSWORD`**: para volver a la del `.env`, borra ese archivo y reinicia.
 

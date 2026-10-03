@@ -78,7 +78,13 @@ const PASSWORD_FILE = join(ROOT, '.password.json');
 const MIN_PASSWORD = 12;
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
 const COOKIE = 'miputer_session';
-const loginAttempts = new Map(); // ip -> { count, until }
+// Intentos fallidos por IP: { count, strikes, until, last }. Se guardan en disco para que
+// reiniciar el servicio no regale intentos.
+const ATTEMPTS_FILE = join(ROOT, 'data', 'intentos-login.json');
+const loginAttempts = new Map();
+try {
+  for (const [ip, e] of Object.entries(JSON.parse(readFileSync(ATTEMPTS_FILE, 'utf8')))) loginAttempts.set(ip, e);
+} catch {}
 
 // { enabled, plain } desde .env, o { enabled, salt, hash, mustChange } desde .password.json
 let auth;
@@ -186,15 +192,62 @@ const changePage = (error) =>
     error,
   });
 
-// Cuenta un intento fallido; tras 5 seguidos, bloqueo de 15 minutos para esa IP.
-async function failAttempt(ip) {
-  const count = (loginAttempts.get(ip)?.count || 0) + 1;
-  loginAttempts.set(ip, { count: count >= 5 ? 0 : count, until: count >= 5 ? Date.now() + 15 * 60000 : 0 });
-  await new Promise((r) => setTimeout(r, 500));
+// Anti fuerza bruta: 3 contraseñas mal seguidas bloquean esa IP. Cada bloqueo nuevo dura
+// más (15 min, 1 h, 6 h, 24 h) y el historial se olvida tras 24 h sin fallos.
+const MAX_TRIES = 3;
+const BLOCKS = [15, 60, 360, 1440].map((m) => m * 60000);
+const FORGET_AFTER = 24 * 3600_000;
+
+function saveAttempts() {
+  const now = Date.now();
+  for (const [ip, e] of loginAttempts) if (e.until < now && now - e.last > FORGET_AFTER) loginAttempts.delete(ip);
+  try {
+    mkdirSync(join(ROOT, 'data'), { recursive: true });
+    writeFileSync(`${ATTEMPTS_FILE}.tmp`, JSON.stringify(Object.fromEntries(loginAttempts)), { mode: 0o600 });
+    renameSync(`${ATTEMPTS_FILE}.tmp`, ATTEMPTS_FILE);
+  } catch (e) {
+    console.error('No se pudieron guardar los intentos de login:', e.message);
+  }
 }
 
+// En IPv6 cada conexión puede tener millones de direcciones: se bloquea el /64 entero.
+function attemptKey(ip) {
+  const v4 = String(ip).replace(/^::ffff:/, '');
+  if (net.isIPv4(v4)) return v4;
+  return `${String(ip).split(':').slice(0, 4).join(':')}::/64`;
+}
+
+// Devuelve cuántos intentos quedan (0 = recién bloqueada).
+async function failAttempt(ip) {
+  const key = attemptKey(ip);
+  const now = Date.now();
+  let e = loginAttempts.get(key);
+  if (!e || (e.until < now && now - e.last > FORGET_AFTER)) e = { count: 0, strikes: 0, until: 0, last: 0 };
+  e.count += 1;
+  e.last = now;
+  let left = MAX_TRIES - e.count;
+  if (left <= 0) {
+    e.until = now + BLOCKS[Math.min(e.strikes, BLOCKS.length - 1)];
+    e.strikes += 1;
+    e.count = 0;
+    left = 0;
+    console.warn(`Login bloqueado para ${key} durante ${Math.round((e.until - now) / 60000)} min (bloqueo nº ${e.strikes})`);
+  }
+  loginAttempts.set(key, e);
+  saveAttempts();
+  await new Promise((r) => setTimeout(r, 800));
+  return left;
+}
+
+function clearAttempts(ip) {
+  if (loginAttempts.delete(attemptKey(ip))) saveAttempts();
+}
+
+const blockedText = (mins) => `Demasiados intentos fallidos. Acceso bloqueado desde esta conexión durante ${mins >= 90 ? `${Math.round(mins / 60)} h` : `${mins} min`}.`;
+const triesText = (left) => (left ? ` Te queda${left === 1 ? '' : 'n'} ${left} intento${left === 1 ? '' : 's'}.` : '');
+
 function blockedFor(ip) {
-  const entry = loginAttempts.get(ip);
+  const entry = loginAttempts.get(attemptKey(ip));
   return entry && entry.until > Date.now() ? Math.ceil((entry.until - Date.now()) / 60000) : 0;
 }
 
@@ -206,14 +259,14 @@ async function handleAuth(req, res, url) {
   if (url.pathname === '/login' && req.method === 'POST') {
     const ip = clientIp(req);
     const mins = blockedFor(ip);
-    if (mins) return sendHtml(res, 429, loginPage(`Demasiados intentos. Prueba de nuevo en ${mins} min.`));
+    if (mins) return sendHtml(res, 429, loginPage(blockedText(mins)));
     const body = await readBody(req, 4096);
     const password = new URLSearchParams(body.toString()).get('password') || '';
     if (!checkPassword(password)) {
-      await failAttempt(ip);
-      return sendHtml(res, 401, loginPage('Contraseña incorrecta'));
+      const left = await failAttempt(ip);
+      return sendHtml(res, left ? 401 : 429, loginPage(left ? `Contraseña incorrecta.${triesText(left)}` : blockedText(blockedFor(ip))));
     }
-    loginAttempts.delete(ip);
+    clearAttempts(ip);
     res.setHeader('set-cookie', sessionCookie(req, makeSession(), SESSION_DAYS * 86400));
     return redirect(res, auth.mustChange ? '/cambiar-clave' : '/');
   }
@@ -224,17 +277,17 @@ async function handleAuth(req, res, url) {
     if (!sameOrigin(req)) return sendHtml(res, 403, changePage('Origen no permitido'));
     const ip = clientIp(req);
     const mins = blockedFor(ip);
-    if (mins) return sendHtml(res, 429, changePage(`Demasiados intentos. Prueba de nuevo en ${mins} min.`));
+    if (mins) return sendHtml(res, 429, changePage(blockedText(mins)));
     const form = new URLSearchParams((await readBody(req, 4096)).toString());
     const [current, password, repeat] = ['current', 'password', 'repeat'].map((k) => form.get(k) || '');
     if (!checkPassword(current)) {
-      await failAttempt(ip);
-      return sendHtml(res, 401, changePage('La contraseña actual no es correcta'));
+      const left = await failAttempt(ip);
+      return sendHtml(res, left ? 401 : 429, changePage(left ? `La contraseña actual no es correcta.${triesText(left)}` : blockedText(blockedFor(ip))));
     }
     if (password.length < MIN_PASSWORD) return sendHtml(res, 400, changePage(`La nueva contraseña necesita al menos ${MIN_PASSWORD} caracteres`));
     if (password !== repeat) return sendHtml(res, 400, changePage('Las contraseñas nuevas no coinciden'));
     if (password === current) return sendHtml(res, 400, changePage('La nueva contraseña tiene que ser distinta de la actual'));
-    loginAttempts.delete(ip);
+    clearAttempts(ip);
     savePassword(password, false);
     console.log('Contraseña cambiada desde la web');
     res.setHeader('set-cookie', sessionCookie(req, makeSession(), SESSION_DAYS * 86400));
