@@ -179,6 +179,15 @@ navegador ──wss /api/pty──▶ server.js (usuario miputer)
 
 **Activarla:** instala las dependencias (`npm ci`) y define en `.env` `CLAUDE_TMUX_SOCKET` y `CLAUDE_WORKDIR` (ver `.env.example`). El resto está en el apartado siguiente.
 
+## Navegador
+
+La app **Navegador** es un Google Chrome de verdad que corre en el VPS (usuario aislado `mpweb`) y se ve en una ventana de MiPuter, como el escritorio de Windows: pantalla virtual TigerVNC en `127.0.0.1:5905` → guacd → WebSocket `/api/web`. Así funcionan Google, YouTube, bancos o cualquier sitio que no se deja mostrar dentro de otra página. Los sitios ven la IP del VPS. Por ahora no hay sonido.
+
+- **Descargas**: Chrome guarda en `/home/mpweb/Descargas`; desde 📥 se pasan a `/Descargas` de MiPuter (B2) o se borran.
+- **Subir archivos a una web**: 📤 copia archivos de MiPuter a `/home/mpweb/MiPuter`, que se elige en el diálogo de Chrome.
+- **Aislamiento**: Chrome no llega a loopback, redes privadas ni a las IPs del VPS, y no ve otras carpetas. MiPuter abre los archivos de mpweb sin seguir enlaces simbólicos.
+- **Instalación** (una vez): `sudo bash deploy/setup-web.sh` (Chrome del repositorio oficial de Google, TigerVNC, usuario `mpweb`, servicios `miputer-web-x` y `miputer-web`). La contraseña VNC se genera sola y queda en `.web.json`.
+
 ## Despliegue
 
 Así está desplegado en un VPS Ubuntu 24.04 que ya tenía nginx y otras apps.
