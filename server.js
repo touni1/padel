@@ -16,6 +16,8 @@ import { pipeline } from 'node:stream/promises';
 import { mkdtemp, writeFile, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import net from 'node:net';
+import dns from 'node:dns';
+import https from 'node:https';
 import { StringDecoder } from 'node:string_decoder';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
@@ -325,14 +327,14 @@ async function b2Request(method, key, { body, headers = {}, query = '' } = {}, c
 // lenta, o comprimir y extraer, que esperan a que suba lo anterior.
 const RANGE_BYTES = 32 * 1024 * 1024; // cada tramo es una lectura (transacción clase B) en B2
 
-function b2RangeStream(key, start, end) {
+function b2RangeStream(key, start, end, version = '') {
   let next = start; // siguiente byte a pedir
   let size = 4 * 1024 * 1024; // los tramos empiezan chicos y se duplican hasta RANGE_BYTES
   const ahead = []; // tramos ya pedidos, en orden (como mucho uno por delante del que se envía)
   const fetchRange = async (from, to) => {
     for (let attempt = 1; ; attempt++) {
       try {
-        const r = await b2Request('GET', key, { headers: { range: `bytes=${from}-${to - 1}` } });
+        const r = await b2Request('GET', key, { headers: { range: `bytes=${from}-${to - 1}` }, query: version ? `?versionId=${encodeRfc3986(version)}` : '' });
         const buf = Buffer.from(await r.arrayBuffer());
         if (buf.length !== to - from) throw new Error(`B2 devolvió ${buf.length} bytes en vez de ${to - from}`);
         return buf;
@@ -377,8 +379,8 @@ function b2RangeStream(key, start, end) {
 
 // Envía un archivo de B2 al navegador, con soporte de Range (adelantar vídeos,
 // reanudar descargas). `extra` añade cabeceras (descarga, caché…).
-async function sendB2File(req, res, key, extra = {}) {
-  const head = await b2Request('HEAD', key);
+async function sendB2File(req, res, key, extra = {}, version = '') {
+  const head = await b2Request('HEAD', key, { query: version ? `?versionId=${encodeRfc3986(version)}` : '' });
   const size = Number(head.headers.get('content-length')) || 0;
   const etag = head.headers.get('etag');
   const headers = {
@@ -387,6 +389,10 @@ async function sendB2File(req, res, key, extra = {}) {
     ...(etag ? { etag } : {}),
     ...extra,
   };
+  if (/html|svg|xml|javascript/i.test(headers['content-type'])) {
+    headers['content-security-policy'] = 'sandbox';
+    headers['x-content-type-options'] = 'nosniff';
+  }
   // El navegador pregunta si su copia sigue valiendo: si no cambió, no se baja nada de B2.
   if (etag && req.headers['if-none-match'] === etag && !req.headers.range) {
     res.writeHead(304, { etag, 'cache-control': headers['cache-control'] || 'no-cache' });
@@ -406,7 +412,7 @@ async function sendB2File(req, res, key, extra = {}) {
   headers['content-length'] = end - start;
   res.writeHead(headers['content-range'] ? 206 : 200, headers);
   if (req.method === 'HEAD' || end === start) return res.end();
-  const stream = b2RangeStream(key, start, end);
+  const stream = b2RangeStream(key, start, end, version);
   stream.on('error', (e) => {
     console.error(`Descarga cortada (${key}): ${e.message}`);
     res.destroy(e);
@@ -1066,7 +1072,11 @@ function saveShares() {
   renameSync(tmp, SHARES_FILE);
 }
 
-const shareAlive = (sh) => sh.expires > Date.now() && (!sh.maxDownloads || sh.downloads < sh.maxDownloads);
+// Tipos: archivo (por defecto, los enlaces viejos no lo tienen), carpeta y "pedir archivos".
+const shareType = (sh) => sh.type || 'file';
+const shareAlive = (sh) =>
+  sh.expires > Date.now() &&
+  (shareType(sh) === 'upload' ? !sh.maxFiles || sh.files < sh.maxFiles : !sh.maxDownloads || sh.downloads < sh.maxDownloads);
 
 function purgeShares() {
   const dead = Object.keys(shares).filter((t) => !shareAlive(shares[t]));
@@ -1081,15 +1091,72 @@ function siteOrigin(req) {
 
 const shareView = (req, token, sh) => ({
   token,
-  url: `${siteOrigin(req)}/d/${token}`,
+  type: shareType(sh),
+  url: `${siteOrigin(req)}/${shareType(sh) === 'upload' ? 'u' : 'd'}/${token}`,
   key: sh.key,
+  dir: sh.dir,
   name: sh.name,
   size: sh.size,
   created: sh.created,
   expires: sh.expires,
   downloads: sh.downloads,
   maxDownloads: sh.maxDownloads,
+  files: sh.files,
+  bytes: sh.bytes,
+  maxFiles: sh.maxFiles,
+  maxBytes: sh.maxBytes,
 });
+
+// ---- El árbol visto desde el servidor (carpetas compartidas, archivos recibidos) ----
+
+const treePath = (p) => String(p || '').split('/').filter((s) => s && s !== '.' && s !== '..');
+
+async function treeNode(path) {
+  let node = (await loadTree()).tree;
+  for (const part of treePath(path)) node = node?.type === 'dir' ? node.children[part] : undefined;
+  return node || null;
+}
+
+function uniqueChild(children, name) {
+  if (!children[name]) return name;
+  const dot = name.lastIndexOf('.');
+  const [base, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ''];
+  for (let i = 2; ; i++) if (!children[`${base} (${i})${ext}`]) return `${base} (${i})${ext}`;
+}
+
+// Agrega archivos ya subidos a B2 a una carpeta del árbol (la crea si no existe).
+async function addFilesToTree(dir, files) {
+  const current = await loadTree();
+  if (!current.tree) throw new Error('El árbol de carpetas todavía no existe');
+  let node = current.tree;
+  for (const part of treePath(dir)) {
+    if (node.children[part]?.type !== 'dir') node.children[part] = { type: 'dir', children: {}, mtime: Date.now() };
+    node = node.children[part];
+  }
+  const names = files.map((f) => {
+    const name = uniqueChild(node.children, f.name);
+    node.children[name] = { type: 'file', content: '', remote: { key: f.key, size: f.size, type: f.type }, mtime: Date.now() };
+    return name;
+  });
+  node.mtime = Date.now();
+  tree = { version: current.version + 1, tree: current.tree, updated: Date.now() };
+  saveTreeFile();
+  scheduleTreeBackup();
+  return names;
+}
+
+// Todo lo que cuelga de un nodo, con rutas relativas (para el zip de una carpeta compartida).
+function collectNode(node, rel, out = []) {
+  if (node.type === 'dir') {
+    out.push({ path: `${rel}/`, dir: true });
+    for (const [name, child] of Object.entries(node.children)) collectNode(child, `${rel}/${name}`, out);
+  } else if (node.remote) {
+    out.push({ path: rel, key: node.remote.key, size: node.remote.size || 0 });
+  } else {
+    out.push({ path: rel, data: node.content || '', size: (node.content || '').length });
+  }
+  return out;
+}
 
 async function handleSharesApi(req, res, url) {
   purgeShares();
@@ -1111,63 +1178,115 @@ async function handleSharesApi(req, res, url) {
   } catch {
     return sendJson(res, 400, { error: 'Datos no válidos' });
   }
-  const key = checkKey(input.key);
   const hours = Number(input.hours);
   if (!SHARE_HOURS.includes(hours)) return sendJson(res, 400, { error: 'Duración no válida' });
-  const maxDownloads = input.maxDownloads ? Math.min(1000, Math.max(1, Math.floor(Number(input.maxDownloads)))) : null;
-  const head = await b2Request('HEAD', key); // también comprueba que el archivo existe
+  const type = ['file', 'folder', 'upload'].includes(input.type) ? input.type : 'file';
+  const base = { created: Date.now(), expires: Date.now() + hours * 3600_000 };
   const token = crypto.randomBytes(24).toString('base64url');
-  shares[token] = {
-    key,
-    name: String(input.name || key.slice(PREFIX.length + 37) || 'archivo').slice(0, 200),
-    size: Number(head.headers.get('content-length')) || 0,
-    created: Date.now(),
-    expires: Date.now() + hours * 3600_000,
-    maxDownloads,
-    downloads: 0,
-  };
+
+  if (type === 'file') {
+    const key = checkKey(input.key);
+    const maxDownloads = input.maxDownloads ? Math.min(1000, Math.max(1, Math.floor(Number(input.maxDownloads)))) : null;
+    const head = await b2Request('HEAD', key); // también comprueba que el archivo existe
+    shares[token] = { ...base, key, name: String(input.name || key.slice(PREFIX.length + 37) || 'archivo').slice(0, 200), size: Number(head.headers.get('content-length')) || 0, maxDownloads, downloads: 0 };
+  } else {
+    const dir = `/${treePath(input.path).join('/')}`;
+    if (dir === '/' || dir === '/Papelera' || dir.startsWith('/Papelera/')) return sendJson(res, 400, { error: 'Elige una carpeta' });
+    const node = await treeNode(dir);
+    if (type === 'folder' && node?.type !== 'dir') return sendJson(res, 404, { error: 'La carpeta no existe en el servidor (espera unos segundos a que se sincronice)' });
+    const name = treePath(dir).at(-1);
+    if (type === 'folder') {
+      const maxDownloads = input.maxDownloads ? Math.min(1000, Math.max(1, Math.floor(Number(input.maxDownloads)))) : null;
+      shares[token] = { ...base, type, dir, name, maxDownloads, downloads: 0 };
+    } else {
+      const maxFiles = input.maxFiles ? Math.min(10_000, Math.max(1, Math.floor(Number(input.maxFiles)))) : null;
+      const maxBytes = Math.min(MAX_UPLOAD_BYTES * 10, Math.max(1024 ** 2, Number(input.maxBytes) || 1024 ** 3));
+      shares[token] = { ...base, type, dir, name, maxFiles, maxBytes, files: 0, bytes: 0 };
+    }
+  }
   saveShares();
   return sendJson(res, 201, shareView(req, token, shares[token]));
 }
 
 const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const human = (n) => (n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`);
+const untilText = (ms) => new Date(ms).toLocaleString('es-ES', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' });
 
-function sharePage(res, status, body) {
+// Página pública (descarga o subida). `script` va con un nonce: es lo único que puede ejecutarse.
+function sharePage(res, status, body, script = '') {
+  const nonce = crypto.randomBytes(16).toString('base64');
   res.writeHead(status, {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
     'referrer-policy': 'no-referrer',
-    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+    'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; script-src 'nonce-${nonce}'; form-action 'none'; base-uri 'none'`,
   });
   res.end(`<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Descarga · MiPuter</title>
+<title>MiPuter</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>◆</text></svg>">
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     background: radial-gradient(circle at 20% 20%, #3a5a8c 0%, #1d2b44 55%, #111a2b 100%); color: #1c2230; }
-  main { width: 100%; max-width: 380px; padding: 28px; border-radius: 14px; background: #fff;
+  main { width: 100%; max-width: 420px; padding: 28px; border-radius: 14px; background: #fff;
     box-shadow: 0 12px 32px rgba(0,0,0,.35); display: grid; gap: 12px; text-align: center; }
   .icon { font-size: 44px; }
   h1 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
   p { margin: 0; color: #6b7385; font-size: 14px; }
-  a.btn { display: block; font-weight: 600; padding: 11px; border-radius: 8px; background: #3b82f6; color: #fff; text-decoration: none; }
+  a.btn, label.btn { display: block; font-weight: 600; padding: 11px; border-radius: 8px; background: #3b82f6; color: #fff; text-decoration: none; cursor: pointer; }
+  input[type=file] { display: none; }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; text-align: left; font-size: 13px; }
+  li { padding: 6px 8px; border-radius: 6px; background: #f2f4f8; overflow-wrap: anywhere; }
+  li.ok { background: #e3f6e8; } li.err { background: #fde7e9; }
+  progress { width: 100%; }
 </style></head>
-<body><main>${body}</main></body></html>`);
+<body><main>${body}</main>${script ? `<script nonce="${nonce}">${script}</script>` : ''}</body></html>`);
 }
 
+const deadPage = (res) => sharePage(res, 404, '<div class="icon">⌛</div><h1>Este enlace no existe o ya caducó</h1><p>Pídele a quien te lo mandó uno nuevo.</p>');
+
+// /d/<token>: descargar un archivo o una carpeta (como zip armado al vuelo).
 async function handleShareDownload(req, res, url) {
   const [, , token, action] = url.pathname.split('/');
   purgeShares();
   const sh = token && Object.hasOwn(shares, token) ? shares[token] : null;
-  if (!sh) {
-    return sharePage(res, 404, '<div class="icon">⌛</div><h1>Este enlace no existe o ya caducó</h1><p>Pídele a quien te lo mandó uno nuevo.</p>');
-  }
+  if (!sh || shareType(sh) === 'upload') return deadPage(res);
+  const folder = shareType(sh) === 'folder';
+  const node = folder ? await treeNode(sh.dir) : null;
+  if (folder && node?.type !== 'dir') return sharePage(res, 404, '<div class="icon">🗑️</div><h1>La carpeta ya no está disponible</h1>');
+
   if (action === 'descargar') {
+    if (folder) {
+      if (!yazl) return sharePage(res, 503, '<h1>No se puede armar el zip ahora</h1>');
+      sh.downloads++;
+      saveShares();
+      const zip = new yazl.ZipFile();
+      for (const e of collectNode(node, sh.name)) {
+        const opts = { compress: !ALREADY_COMPRESSED.test(e.path) };
+        if (e.dir) zip.addEmptyDirectory(e.path);
+        else if (e.key)
+          zip.addReadStreamLazy(e.path, opts, (cb) =>
+            b2Request('HEAD', e.key).then((h) => cb(null, b2RangeStream(e.key, 0, Number(h.headers.get('content-length')) || 0)), cb),
+          );
+        else zip.addBuffer(decodeData(e.data), e.path, opts);
+      }
+      zip.on('error', (err) => {
+        console.error(`Zip de carpeta compartida: ${err.message}`);
+        res.destroy(err);
+      });
+      zip.end();
+      res.writeHead(200, {
+        'content-type': 'application/zip',
+        'content-disposition': `attachment; filename*=UTF-8''${encodeRfc3986(`${sh.name}.zip`)}`,
+        'cache-control': 'no-store',
+        'referrer-policy': 'no-referrer',
+      });
+      res.on('close', () => zip.outputStream.destroy());
+      return zip.outputStream.pipe(res);
+    }
     try {
       await b2Request('HEAD', sh.key);
     } catch (e) {
@@ -1189,13 +1308,208 @@ async function handleShareDownload(req, res, url) {
   }
   if (action) return sharePage(res, 404, '<h1>No encontrado</h1>');
   const left = sh.maxDownloads ? ` · quedan ${sh.maxDownloads - sh.downloads} descargas` : '';
-  const until = new Date(sh.expires).toLocaleString('es-ES', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' });
+  if (folder) {
+    const items = collectNode(node, sh.name).filter((e) => !e.dir);
+    const size = items.reduce((a, e) => a + e.size, 0);
+    return sharePage(
+      res,
+      200,
+      `<div class="icon">📁</div><h1>${esc(sh.name)}</h1><p>${items.length} archivo${items.length === 1 ? '' : 's'} · ${human(size)} · disponible hasta el ${esc(untilText(sh.expires))}${left}</p>
+       <a class="btn" href="/d/${esc(token)}/descargar">Descargar todo (.zip)</a><p>Compartido desde MiPuter</p>`,
+    );
+  }
   return sharePage(
     res,
     200,
-    `<div class="icon">📦</div><h1>${esc(sh.name)}</h1><p>${human(sh.size)} · disponible hasta el ${esc(until)}${left}</p>
+    `<div class="icon">📦</div><h1>${esc(sh.name)}</h1><p>${human(sh.size)} · disponible hasta el ${esc(untilText(sh.expires))}${left}</p>
      <a class="btn" href="/d/${esc(token)}/descargar">Descargar</a><p>Compartido desde MiPuter</p>`,
   );
+}
+
+// /u/<token>: página para que alguien te suba archivos a una carpeta, sin entrar.
+const UPLOAD_SCRIPT = `
+const input = document.querySelector('input[type=file]');
+const list = document.querySelector('ul');
+const info = document.querySelector('.left');
+input.onchange = async () => {
+  for (const file of input.files) {
+    const li = document.createElement('li');
+    li.textContent = file.name;
+    const bar = document.createElement('progress');
+    bar.max = 1; bar.value = 0;
+    li.appendChild(bar);
+    list.appendChild(li);
+    const res = await new Promise((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', location.pathname.replace(/\\/$/, '') + '/subir?name=' + encodeURIComponent(file.name));
+      xhr.setRequestHeader('content-type', file.type || 'application/octet-stream');
+      xhr.upload.onprogress = (e) => e.lengthComputable && (bar.value = e.loaded / e.total);
+      xhr.onload = () => resolve({ ok: xhr.status < 300, data: (() => { try { return JSON.parse(xhr.responseText); } catch { return {}; } })() });
+      xhr.onerror = () => resolve({ ok: false, data: { error: 'Se cortó la conexión' } });
+      xhr.send(file);
+    });
+    bar.remove();
+    li.className = res.ok ? 'ok' : 'err';
+    li.textContent = (res.ok ? '✅ ' : '❌ ') + file.name + (res.ok ? '' : ' — ' + (res.data.error || 'error'));
+    if (res.data.left) info.textContent = res.data.left;
+  }
+  input.value = '';
+};`;
+
+function uploadLeft(sh) {
+  const parts = [`hasta el ${untilText(sh.expires)}`];
+  if (sh.maxFiles) parts.push(`quedan ${sh.maxFiles - sh.files} archivos`);
+  parts.push(`${human(Math.max(0, sh.maxBytes - sh.bytes))} disponibles`);
+  return parts.join(' · ');
+}
+
+async function handleUploadRequest(req, res, url) {
+  const [, , token, action] = url.pathname.split('/');
+  purgeShares();
+  const sh = token && Object.hasOwn(shares, token) ? shares[token] : null;
+  if (!sh || shareType(sh) !== 'upload') return action ? sendJson(res, 404, { error: 'El enlace caducó' }) : deadPage(res);
+
+  if (action === 'subir' && req.method === 'POST') {
+    const size = Number(req.headers['content-length']);
+    if (!Number.isFinite(size) || size <= 0) return sendJson(res, 411, { error: 'Archivo vacío' });
+    if (size > MAX_UPLOAD_BYTES) return sendJson(res, 413, { error: `Supera el límite de ${human(MAX_UPLOAD_BYTES)}` });
+    if (sh.bytes + size > sh.maxBytes) return sendJson(res, 413, { error: 'No queda espacio en este enlace' });
+    if (sh.maxFiles && sh.files >= sh.maxFiles) return sendJson(res, 403, { error: 'Ya se subieron todos los archivos permitidos' });
+    // Se reserva antes de subir, así dos subidas a la vez no se pasan del límite.
+    sh.files++;
+    sh.bytes += size;
+    saveShares();
+    const name = String(url.searchParams.get('name') || 'archivo').replace(/[\\/\x00-\x1f]/g, '_').slice(-150).trim() || 'archivo';
+    const type = /^[\w.+-]+\/[\w.+-]+$/.test(req.headers['content-type'] || '') ? req.headers['content-type'] : 'application/octet-stream';
+    const key = newKey(name);
+    try {
+      const uploaded = await streamToB2(req, key, type);
+      if (uploaded !== size) throw new Error('La subida llegó incompleta');
+      await addFilesToTree(sh.dir, [{ name, key, size, type }]);
+      console.log(`Recibido por enlace: ${name} (${human(size)}) en ${sh.dir}`);
+      return sendJson(res, 201, { ok: true, left: uploadLeft(sh) });
+    } catch (e) {
+      sh.files--;
+      sh.bytes -= size;
+      saveShares();
+      b2Request('DELETE', key).catch(() => {});
+      throw e;
+    }
+  }
+  if (action) return sendJson(res, 404, { error: 'No encontrado' });
+  return sharePage(
+    res,
+    200,
+    `<div class="icon">📤</div><h1>Enviar archivos a «${esc(sh.name)}»</h1><p class="left">${esc(uploadLeft(sh))}</p>
+     <label class="btn">Elegir archivos…<input type="file" multiple></label><ul></ul><p>Solo puedes subir; no ves lo que hay en la carpeta.</p>`,
+    UPLOAD_SCRIPT,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Descargar desde una URL (/api/fetch-url)
+// ---------------------------------------------------------------------------
+//
+// El servidor baja el archivo directo a B2. Para que no se pueda usar contra
+// servicios internos (SSRF), solo se aceptan direcciones públicas: se comprueba
+// la IP real al conectar (no solo el nombre), también en cada redirección.
+
+function isPublicIp(ip) {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    return !(a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19)) || a >= 224);
+  }
+  const v6 = ip.toLowerCase();
+  const mapped = v6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return isPublicIp(mapped[1]);
+  return !(v6 === '::' || v6 === '::1' || v6.startsWith('fc') || v6.startsWith('fd') || v6.startsWith('fe8') || v6.startsWith('fe9') || v6.startsWith('fea') || v6.startsWith('feb') || v6.startsWith('ff') || v6.startsWith('::ffff:') || v6.startsWith('64:ff9b'));
+}
+
+function safeLookup(hostname, options, cb) {
+  dns.lookup(hostname, { all: true }, (err, addresses) => {
+    if (err) return cb(err);
+    const ok = addresses.filter((a) => isPublicIp(a.address));
+    if (!ok.length || ok.length !== addresses.length) return cb(Object.assign(new Error('Esa dirección no es pública'), { code: 'EPRIVATE' }));
+    if (options?.all) return cb(null, ok);
+    cb(null, ok[0].address, ok[0].family);
+  });
+}
+
+function fetchPublic(target, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    let u;
+    try {
+      u = new URL(target);
+    } catch {
+      return reject(new Error('La URL no es válida'));
+    }
+    if (!['http:', 'https:'].includes(u.protocol)) return reject(new Error('Solo se aceptan enlaces http o https'));
+    if (net.isIP(u.hostname.replace(/^\[|\]$/g, '')) && !isPublicIp(u.hostname.replace(/^\[|\]$/g, ''))) return reject(new Error('Esa dirección no es pública'));
+    const lib = u.protocol === 'https:' ? https : http;
+    const req = lib.get(u, { lookup: safeLookup, headers: { 'user-agent': 'Mozilla/5.0 (MiPuter)' }, timeout: 30_000 }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        if (redirects >= 5) return reject(new Error('Demasiadas redirecciones'));
+        return resolve(fetchPublic(new URL(res.headers.location, u).href, redirects + 1));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`El servidor respondió ${res.statusCode}`));
+      }
+      resolve({ res, url: u });
+    });
+    req.on('timeout', () => req.destroy(new Error('El servidor tardó demasiado en responder')));
+    req.on('error', (e) => reject(e.code === 'EPRIVATE' ? new Error('Esa dirección no es pública') : e));
+  });
+}
+
+function fileNameFrom(res, u) {
+  const cd = res.headers['content-disposition'] || '';
+  const star = cd.match(/filename\*=(?:UTF-8'')?([^;]+)/i);
+  const plain = cd.match(/filename="?([^";]+)"?/i);
+  let name = '';
+  try {
+    name = star ? decodeURIComponent(star[1].trim().replace(/^"|"$/g, '')) : plain ? plain[1] : decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || '');
+  } catch {}
+  return name.replace(/[\\/\x00-\x1f]/g, '_').slice(-150).trim() || 'descarga';
+}
+
+async function handleFetchUrl(req, res) {
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
+  let input;
+  try {
+    input = JSON.parse((await readBody(req, 8192)).toString());
+  } catch {
+    return sendJson(res, 400, { error: 'Datos no válidos' });
+  }
+  const target = String(input.url || '').trim();
+  const id = startJob(async (job) => {
+    const { res: r, url: u } = await fetchPublic(target);
+    const total = Number(r.headers['content-length']) || 0;
+    if (total > MAX_UPLOAD_BYTES) {
+      r.destroy();
+      throw new Error(`El archivo pesa ${human(total)}: el límite es ${human(MAX_UPLOAD_BYTES)}`);
+    }
+    const name = fileNameFrom(r, u);
+    const type = String(r.headers['content-type'] || 'application/octet-stream').split(';')[0].trim();
+    let read = 0;
+    const counter = new Transform({
+      transform(chunk, _, done) {
+        read += chunk.length;
+        if (read > MAX_UPLOAD_BYTES) return done(new Error(`El archivo supera el límite de ${human(MAX_UPLOAD_BYTES)}`));
+        if (total) job.progress = Math.min(0.99, read / total);
+        done(null, chunk);
+      },
+    });
+    r.on('error', (e) => counter.destroy(e));
+    // Si deja de llegar información durante un minuto, se corta.
+    r.setTimeout(60_000, () => r.destroy(new Error('La descarga se quedó parada')));
+    const key = newKey(name);
+    const size = await streamToB2(r.pipe(counter), key, /^[\w.+-]+\/[\w.+-]+$/.test(type) ? type : 'application/octet-stream');
+    return { key, size, type, name };
+  });
+  return sendJson(res, 202, { job: id });
 }
 
 // ---------------------------------------------------------------------------
@@ -1252,6 +1566,38 @@ async function handleThumbs(req, res, url) {
   mkdirSync(THUMB_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(file, body, { mode: 0o600 });
   return sendJson(res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// Versiones anteriores (/api/versions)
+// ---------------------------------------------------------------------------
+//
+// B2 guarda las versiones viejas de cada objeto (según la regla de ciclo de vida
+// del bucket). Restaurar copia esa versión como la actual.
+
+async function handleVersions(req, res, url) {
+  const key = checkKey(url.searchParams.get('key'));
+  if (req.method === 'GET') {
+    const r = await b2Request('GET', '', { query: `?versions&prefix=${encodeRfc3986(key)}&max-keys=100` });
+    const xml = await r.text();
+    const versions = [...xml.matchAll(/<Version>([\s\S]*?)<\/Version>/g)]
+      .map(([, v]) => ({ key: xmlTag(v, 'Key'), id: xmlTag(v, 'VersionId'), date: xmlTag(v, 'LastModified'), size: Number(xmlTag(v, 'Size')), latest: xmlTag(v, 'IsLatest') === 'true' }))
+      .filter((v) => v.key === key)
+      .map(({ key: _k, ...v }) => v)
+      .sort((a, b) => b.date.localeCompare(a.date));
+    return sendJson(res, 200, versions);
+  }
+  if (req.method === 'POST') {
+    if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+    const version = url.searchParams.get('version') || '';
+    if (!/^[\w.:-]{1,200}$/.test(version)) return sendJson(res, 400, { error: 'Versión no válida' });
+    const source = `/${b2.bucket}/${key.split('/').map(encodeRfc3986).join('/')}?versionId=${encodeRfc3986(version)}`;
+    await b2Request('PUT', key, { headers: { 'x-amz-copy-source': source } });
+    removeThumb(key);
+    const head = await b2Request('HEAD', key);
+    return sendJson(res, 200, { size: Number(head.headers.get('content-length')) || 0 });
+  }
+  return sendJson(res, 405, { error: 'Método no permitido' });
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,6 +1882,8 @@ async function handleApi(req, res, url) {
   if (route === '/api/tree') return handleTree(req, res);
   if (route === '/api/shares') return handleSharesApi(req, res, url);
   if (route === '/api/thumbs') return handleThumbs(req, res, url);
+  if (route === '/api/versions') return handleVersions(req, res, url);
+  if (route === '/api/fetch-url' && method === 'POST') return handleFetchUrl(req, res);
   if (route === '/api/windows-config') return handleWindowsConfig(req, res);
   if (route === '/api/zip' || route === '/api/unzip' || route === '/api/jobs') return handleZipApi(req, res, url);
   if (route === '/api/pdf' && method === 'POST') return handlePdfOps(req, res);
@@ -1573,7 +1921,9 @@ async function handleApi(req, res, url) {
       const extra = { 'cache-control': 'private, no-cache' };
       const download = url.searchParams.get('download');
       if (download) extra['content-disposition'] = `attachment; filename*=UTF-8''${encodeRfc3986(download)}`;
-      return sendB2File(req, res, key, extra);
+      const version = url.searchParams.get('version') || '';
+      if (version && !/^[\w.:-]{1,200}$/.test(version)) return sendJson(res, 400, { error: 'Versión no válida' });
+      return sendB2File(req, res, key, extra, version);
     }
 
     // Sobrescribir: PUT /api/files?key=...  (cuerpo = bytes)
@@ -1637,6 +1987,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Enlaces compartidos: públicos, sin iniciar sesión.
     if (url.pathname.startsWith('/d/') && req.method === 'GET') return await handleShareDownload(req, res, url);
+    if (url.pathname.startsWith('/u/')) return await handleUploadRequest(req, res, url);
     if (auth.enabled && (await handleAuth(req, res, url)) !== false) return;
     if (!isAuthenticated(req)) {
       if (url.pathname.startsWith('/api/')) return sendJson(res, 401, { error: 'Sesión caducada: vuelve a iniciar sesión' });

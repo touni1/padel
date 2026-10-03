@@ -2,10 +2,12 @@
 import * as fs from './fs.js';
 import { openPath, glyphFor, launch } from './registry.js';
 import * as storage from './storage.js';
-import { prompt, confirm, alert, contextMenu, reportError, escapeHtml, toast } from './ui.js';
-import { shareFile } from './apps/shares.js';
+import { prompt, confirm, alert, contextMenu, reportError, escapeHtml, toast, formatSize } from './ui.js';
+import { shareFile, shareFolder, requestFiles } from './apps/shares.js';
 import { canThumb, makeThumb, uploadThumb, ensureThumb, thumbUrl } from './thumbs.js';
 import { isTouch } from './touch.js';
+import * as sel from './selection.js';
+import { showVersions } from './versions.js';
 
 export async function newFolder(dir) {
   const name = await prompt('Nueva carpeta', 'Nombre de la carpeta:', fs.uniqueName(dir, 'Nueva carpeta'));
@@ -21,6 +23,26 @@ export async function renameEntry(path) {
   const name = await prompt('Renombrar', 'Nuevo nombre:', fs.basename(path));
   if (name && name !== fs.basename(path)) {
     await reportError(() => fs.rename(path, fs.join(fs.dirname(path), name)));
+  }
+}
+
+// Varios a la vez: a la papelera (o para siempre si ya estaban en ella).
+export async function deleteEntries(paths) {
+  if (paths.length === 1) return deleteEntry(paths[0]);
+  const inTrash = paths.every((p) => p.startsWith(fs.TRASH + '/'));
+  if (inTrash && !(await confirm('Eliminar', `¿Eliminar ${paths.length} elementos para siempre? Esta acción no se puede deshacer.`))) return;
+  await reportError(() => {
+    paths.forEach((p) => (inTrash ? fs.rm(p) : fs.trash(p)));
+    toast(inTrash ? `${paths.length} elementos eliminados` : `${paths.length} elementos movidos a la papelera`).done();
+  });
+}
+
+export async function downloadMany(paths) {
+  const files = paths.filter((p) => !fs.isDir(p));
+  if (paths.length > files.length) toast('Las carpetas no se descargan sueltas: comprímelas en ZIP').done();
+  for (const p of files) {
+    download(p);
+    await new Promise((r) => setTimeout(r, 400)); // los navegadores frenan muchas descargas seguidas
   }
 }
 
@@ -57,18 +79,41 @@ async function startJob(endpoint, body) {
 }
 
 export async function compressEntry(path) {
+  return compressEntries([path]);
+}
+
+export async function compressEntries(paths) {
+  const path = paths[0];
   const dir = fs.dirname(path);
-  const base = fs.isDir(path) ? fs.basename(path) : fs.basename(path).replace(/\.[^.]+$/, '') || fs.basename(path);
+  const base = paths.length > 1 ? (fs.basename(dir) || 'Archivos') : fs.isDir(path) ? fs.basename(path) : fs.basename(path).replace(/\.[^.]+$/, '') || fs.basename(path);
   const name = fs.uniqueName(dir, `${base}.zip`);
-  const note = toast(`Comprimiendo "${fs.basename(path)}"…`);
+  const label = paths.length > 1 ? `${paths.length} elementos` : `"${fs.basename(path)}"`;
+  const note = toast(`Comprimiendo ${label}…`);
   try {
-    const job = await startJob('api/zip', { name, entries: fs.collect(path) });
-    const result = await waitJob(job, note, `Comprimiendo "${fs.basename(path)}"`);
+    const job = await startJob('api/zip', { name, entries: paths.flatMap((p) => fs.collect(p)) });
+    const result = await waitJob(job, note, `Comprimiendo ${label}`);
     fs.writeRemote(fs.join(dir, fs.uniqueName(dir, name)), result);
     note.done(`Creado "${name}"`);
   } catch (e) {
     note.done('No se pudo comprimir', true);
     await alert('Error al comprimir', e.message);
+  }
+}
+
+// El servidor baja el archivo de internet directo a B2.
+export async function fetchUrlInto(dir) {
+  const url = await prompt('Descargar desde una URL', 'Pega el enlace del archivo (http o https):', 'https://');
+  if (!url || url === 'https://') return;
+  const note = toast('Descargando…');
+  try {
+    const job = await startJob('api/fetch-url', { url });
+    const result = await waitJob(job, note, 'Descargando');
+    const path = fs.join(dir, fs.uniqueName(dir, result.name));
+    fs.writeRemote(path, result);
+    note.done(`Descargado: ${fs.basename(path)} (${formatSize(result.size)})`);
+  } catch (e) {
+    note.done('No se pudo descargar', true);
+    await alert('Error al descargar', e.message);
   }
 }
 
@@ -226,12 +271,28 @@ export function download(path) {
   a.click();
 }
 
-export function entryMenu(e, path) {
+export function entryMenu(e, path, container) {
   e.preventDefault();
   e.stopPropagation();
+  const targets = container ? sel.targetsFor(container, path) : [path];
+  if (container && !sel.selected(container).has(path)) sel.selectOnly(container, [path]);
+  const inTrash = path.startsWith(fs.TRASH + '/');
+  if (targets.length > 1) {
+    const n = targets.length;
+    const multi = [
+      { label: `Cortar (${n})`, action: () => sel.cutPaths(targets) },
+      { label: `Copiar (${n})`, action: () => sel.copyPaths(targets) },
+    ];
+    if (!inTrash && storage.enabled()) multi.push('sep', { label: `Comprimir en ZIP (${n})`, action: () => compressEntries(targets) });
+    multi.push({ label: `Descargar (${n})`, action: () => downloadMany(targets) });
+    multi.push('sep', { label: inTrash ? `Eliminar para siempre (${n})` : `Eliminar (${n})`, action: () => deleteEntries(targets) });
+    return contextMenu(e.clientX, e.clientY, multi);
+  }
   const items = [
     { label: 'Abrir', action: () => openPath(path) },
     'sep',
+    { label: 'Cortar', action: () => sel.cutPaths([path]) },
+    { label: 'Copiar', action: () => sel.copyPaths([path]) },
     { label: 'Renombrar', action: () => renameEntry(path) },
     { label: 'Duplicar', action: () => duplicateEntry(path) },
   ];
@@ -239,6 +300,10 @@ export function entryMenu(e, path) {
   if (/^(jpe?g|png|webp|gif|bmp)$/.test(fs.extname(path)) && !path.startsWith(fs.TRASH + '/')) items.push({ label: 'Editar imagen', action: () => reportError(() => launch('imgedit', { path })) });
   if (/^(pdf|jpe?g|png|webp|gif|bmp)$/.test(fs.extname(path)) && !path.startsWith(fs.TRASH + '/')) items.push({ label: 'Herramientas PDF…', action: () => reportError(() => launch('pdftools', { files: [path] })) });
   if (!fs.isDir(path) && !path.startsWith(fs.TRASH + '/') && storage.enabled()) items.push({ label: 'Compartir enlace…', action: () => shareFile(path) });
+  if (fs.getRemote(path)) items.push({ label: 'Versiones anteriores…', action: () => showVersions(path) });
+  if (fs.isDir(path) && !path.startsWith(fs.TRASH) && storage.enabled()) {
+    items.push({ label: 'Compartir carpeta…', action: () => shareFolder(path) }, { label: 'Pedir archivos…', action: () => requestFiles(path) });
+  }
   if (!path.startsWith(fs.TRASH + '/') && storage.enabled()) {
     items.push('sep', { label: 'Comprimir en ZIP', action: () => compressEntry(path) });
     if (fs.extname(path) === 'zip' && fs.getRemote(path)) items.push({ label: 'Extraer aquí', action: () => extractEntry(path) });
@@ -249,24 +314,53 @@ export function entryMenu(e, path) {
 
 export function folderMenu(e, dir, extra = []) {
   e.preventDefault();
+  const pasteItem = sel.clipboardEmpty() ? [] : [{ label: 'Pegar', action: () => pasteInto(dir) }, 'sep'];
+  const remoteItems = storage.enabled() && fs.normalize(dir) !== '/' && !fs.normalize(dir).startsWith(fs.TRASH)
+    ? ['sep', { label: 'Descargar desde una URL…', action: () => fetchUrlInto(dir) }, { label: 'Pedir archivos aquí…', action: () => requestFiles(dir) }]
+    : [];
   contextMenu(e.clientX, e.clientY, [
+    ...pasteItem,
     { label: 'Nueva carpeta', action: () => newFolder(dir) },
     { label: 'Nuevo archivo de texto', action: () => newFile(dir) },
     { label: 'Subir archivos…', action: () => uploadInto(dir) },
     { label: 'Subir carpeta…', action: () => uploadFolderInto(dir) },
+    ...remoteItems,
     ...extra,
   ]);
 }
 
 // Pinta las entradas de `dir` como iconos dentro de `container`.
-export function renderIcons(container, dir, { onOpen = openPath } = {}) {
+// Ordena: carpetas primero y después por nombre, fecha, tamaño o tipo.
+function sortEntries(entries, { key = 'name', desc = false } = {}) {
+  const byName = (a, b) => a.name.localeCompare(b.name, 'es', { numeric: true, sensitivity: 'base' });
+  const cmp = {
+    name: byName,
+    date: (a, b) => a.mtime - b.mtime || byName(a, b),
+    size: (a, b) => (a.type === 'dir' ? 0 : a.size - b.size) || byName(a, b),
+    type: (a, b) => fs.extname(a.name).localeCompare(fs.extname(b.name)) || byName(a, b),
+  }[key];
+  return [...entries].sort((a, b) => (a.type !== b.type ? (a.type === 'dir' ? -1 : 1) : (desc ? -1 : 1) * cmp(a, b)));
+}
+
+const typeLabel = (entry) => (entry.type === 'dir' ? 'Carpeta' : fs.extname(entry.name).toUpperCase() || 'Archivo');
+const dateLabel = (ms) => new Date(ms).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+// Pinta las entradas de `dir` como iconos (o filas, con view: 'list') dentro de `container`.
+export function renderIcons(container, dir, { onOpen = openPath, view = 'icons', sort } = {}) {
   container.innerHTML = '';
-  for (const entry of fs.readdir(dir)) {
+  container.classList.toggle('list-view', view === 'list');
+  for (const entry of sortEntries(fs.readdir(dir), sort)) {
     const el = document.createElement('div');
     el.className = 'icon';
     el.draggable = true;
     el.dataset.path = entry.path;
-    el.innerHTML = `<span class="glyph">${glyphFor(entry)}</span><span>${escapeHtml(entry.name)}</span>`;
+    el.innerHTML = `<span class="glyph">${glyphFor(entry)}</span><span class="icon-name">${escapeHtml(entry.name)}</span>`;
+    if (view === 'list') {
+      el.insertAdjacentHTML(
+        'beforeend',
+        `<span class="icon-col col-date">${dateLabel(entry.mtime)}</span><span class="icon-col col-size">${entry.type === 'dir' ? `${entry.size} elem.` : formatSize(entry.size)}</span><span class="icon-col col-type">${escapeHtml(typeLabel(entry))}</span>`,
+      );
+    }
     // Fotos y vídeos: su miniatura en vez del icono.
     if (entry.remote?.thumb) {
       const img = Object.assign(document.createElement('img'), { className: 'thumb', src: thumbUrl(entry.remote.key, entry.mtime), loading: 'lazy', alt: '' });
@@ -281,14 +375,16 @@ export function renderIcons(container, dir, { onOpen = openPath } = {}) {
       el.classList.add('remote');
       el.title = 'Guardado en Backblaze B2';
     }
-    el.onclick = () => {
-      container.querySelectorAll('.icon.selected').forEach((i) => i.classList.remove('selected'));
-      el.classList.add('selected');
-    };
+    el.onclick = (e) => sel.clickIcon(container, el, e);
     el.ondblclick = () => onOpen(entry.path, entry);
     if (isTouch()) el.onclick = () => onOpen(entry.path, entry); // en pantallas táctiles, un toque abre
-    el.oncontextmenu = (e) => entryMenu(e, entry.path);
-    el.ondragstart = (e) => e.dataTransfer.setData('text/x-miputer-path', entry.path);
+    el.oncontextmenu = (e) => entryMenu(e, entry.path, container);
+    el.ondragstart = (e) => {
+      // Si se arrastra algo que forma parte de la selección, se arrastra toda.
+      const paths = sel.targetsFor(container, entry.path);
+      e.dataTransfer.setData('text/x-miputer-paths', JSON.stringify(paths));
+      e.dataTransfer.setData('text/x-miputer-path', entry.path);
+    };
     if (entry.type === 'dir') {
       el.ondragover = (e) => e.preventDefault();
       el.ondrop = (e) => {
@@ -299,12 +395,27 @@ export function renderIcons(container, dir, { onOpen = openPath } = {}) {
     }
     container.appendChild(el);
   }
+  sel.restore(container);
+}
+
+export async function pasteInto(dir) {
+  await reportError(async () => {
+    const pasted = await sel.paste(dir);
+    if (pasted.length) toast(`${pasted.length} elemento${pasted.length === 1 ? '' : 's'} pegado${pasted.length === 1 ? '' : 's'}`).done();
+  });
 }
 
 // Mueve el elemento arrastrado a `dir`.
 export function moveInto(e, dir) {
-  const src = e.dataTransfer.getData('text/x-miputer-path');
-  if (!src || fs.dirname(src) === fs.normalize(dir) || src === fs.normalize(dir)) return;
-  if (fs.normalize(dir) === fs.TRASH) return reportError(() => fs.trash(src));
-  reportError(() => fs.rename(src, fs.join(dir, fs.uniqueName(dir, fs.basename(src)))));
+  let paths;
+  try {
+    paths = JSON.parse(e.dataTransfer.getData('text/x-miputer-paths') || 'null');
+  } catch {}
+  paths ??= [e.dataTransfer.getData('text/x-miputer-path')].filter(Boolean);
+  const target = fs.normalize(dir);
+  for (const src of paths) {
+    if (fs.dirname(src) === target || src === target || (target + '/').startsWith(src + '/')) continue;
+    if (target === fs.TRASH) reportError(() => fs.trash(src));
+    else reportError(() => fs.rename(src, fs.join(target, fs.uniqueName(target, fs.basename(src)))));
+  }
 }

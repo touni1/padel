@@ -10,8 +10,8 @@ export default {
   name: 'Papelera',
   glyph: '🗑️',
   // Arrastrar un icono encima de la papelera del escritorio lo elimina.
-  onDrop(path) {
-    if (path) reportError(() => fs.trash(path));
+  onDrop(paths) {
+    for (const p of paths) reportError(() => fs.trash(p));
   },
   launch() {
     const win = createWindow({ title: 'Papelera', width: 620, height: 420, onClose: () => unsubscribe() });

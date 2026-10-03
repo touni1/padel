@@ -1,7 +1,8 @@
 import * as fs from './fs.js';
 import { register, list, launch } from './registry.js';
 import * as storage from './storage.js';
-import { renderIcons, folderMenu, moveInto, importDrop } from './fileActions.js';
+import { renderIcons, folderMenu, moveInto, importDrop, deleteEntries, renameEntry, pasteInto } from './fileActions.js';
+import * as sel from './selection.js';
 import { hideContextMenu, reportError, escapeHtml, toast } from './ui.js';
 import { applySettings } from './apps/settings.js';
 import { isTouch, enableLongPress } from './touch.js';
@@ -41,7 +42,11 @@ function appIcon(app) {
     el.ondrop = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      app.onDrop(e.dataTransfer.getData('text/x-miputer-path'));
+      let paths;
+      try {
+        paths = JSON.parse(e.dataTransfer.getData('text/x-miputer-paths') || 'null');
+      } catch {}
+      app.onDrop(paths ?? [e.dataTransfer.getData('text/x-miputer-path')].filter(Boolean));
     };
   }
   return el;
@@ -87,6 +92,27 @@ function renderStartMenu() {
   };
 }
 
+// Atajos sobre los archivos del último sitio donde se hizo clic (escritorio o explorador),
+// salvo que se esté escribiendo en un campo o usando una terminal, el escritorio remoto, etc.
+function fileShortcuts(e) {
+  const ctx = sel.activeContext();
+  if (!ctx || e.target.closest('input, textarea, select, [contenteditable], .xterm, .rdp, .pdf-app, .imgedit, .gallery, .player')) return;
+  const mod = e.ctrlKey || e.metaKey;
+  const chosen = [...sel.selected(ctx.container)];
+  const key = e.key.toLowerCase();
+  const run = (fn) => {
+    e.preventDefault();
+    fn();
+  };
+  if (mod && key === 'a') run(() => sel.selectOnly(ctx.container, [...ctx.container.querySelectorAll('.icon[data-path]')].map((i) => i.dataset.path)));
+  else if (mod && key === 'c' && chosen.length) run(() => sel.copyPaths(chosen));
+  else if (mod && key === 'x' && chosen.length) run(() => sel.cutPaths(chosen));
+  else if (mod && key === 'v' && !sel.clipboardEmpty()) run(() => pasteInto(ctx.getDir()));
+  else if (e.key === 'Delete' && chosen.length) run(() => deleteEntries(chosen));
+  else if (e.key === 'F2' && chosen.length === 1) run(() => renameEntry(chosen[0]));
+  else if (e.key === 'Enter' && chosen.length === 1) run(() => ctx.container.querySelector(`.icon[data-path="${CSS.escape(chosen[0])}"]`)?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })));
+}
+
 function startClock() {
   const clock = document.getElementById('clock');
   const tick = () => {
@@ -118,9 +144,8 @@ function wireDesktop() {
       moveInto(e, DESKTOP_DIR);
     }
   });
-  document.getElementById('desktop-icons').addEventListener('click', (e) => {
-    if (e.target.id === 'desktop-icons') e.target.querySelectorAll('.selected').forEach((i) => i.classList.remove('selected'));
-  });
+  // Seleccionar varios en el escritorio (Ctrl/Shift+clic o arrastrando un rectángulo).
+  sel.setup(document.getElementById('desktop-icons'), () => DESKTOP_DIR);
 
   document.addEventListener('click', (e) => {
     hideContextMenu();
@@ -131,6 +156,7 @@ function wireDesktop() {
       hideContextMenu();
       document.getElementById('start-menu').hidden = true;
     }
+    fileShortcuts(e);
   });
 }
 

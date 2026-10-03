@@ -24,7 +24,7 @@ const STATES = ['Inactivo', 'Conectando…', 'Esperando a Windows…', 'Conectad
 export default {
   id: 'windows',
   name: 'Windows',
-  glyph: '🪟',
+  glyph: '🖥️',
   launch() {
     const win = createWindow({ title: 'Windows', width: 1100, height: 720 });
     win.body.classList.add('rdp');

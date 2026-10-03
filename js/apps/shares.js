@@ -40,6 +40,17 @@ async function copy(text) {
 }
 
 // Pinta una lista de enlaces con botones de copiar y desactivar.
+const ICONS = { file: '📄', folder: '📁', upload: '📤' };
+const fmt = (n) => (n < 1024 ** 2 ? `${Math.round(n / 1024)} KB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(1)} GB`);
+
+function linkSummary(link) {
+  if (link.type === 'upload') {
+    return `Caduca ${when(link.expires)} · ${link.files} archivo${link.files === 1 ? '' : 's'} recibido${link.files === 1 ? '' : 's'}${link.maxFiles ? ` de ${link.maxFiles}` : ''} · ${fmt(link.bytes)} de ${fmt(link.maxBytes)}`;
+  }
+  return `Caduca ${when(link.expires)} · ${link.downloads} descarga${link.downloads === 1 ? '' : 's'}${link.maxDownloads ? ` de ${link.maxDownloads}` : ''}`;
+}
+
+// Pinta una lista de enlaces con botones de copiar y desactivar.
 function renderLinks(container, links, onChange, showFile = false) {
   container.innerHTML = links.length ? '' : '<p class="muted">No hay enlaces activos.</p>';
   for (const link of links) {
@@ -49,13 +60,12 @@ function renderLinks(container, links, onChange, showFile = false) {
       <div class="share-meta"><b></b><small></small></div>
       <button class="btn" data-act="copy">Copiar</button>
       <button class="btn" data-act="off">Desactivar</button>`;
-    row.querySelector('b').textContent = showFile ? link.name : link.url;
-    row.querySelector('small').textContent =
-      `Caduca ${when(link.expires)} · ${link.downloads} descarga${link.downloads === 1 ? '' : 's'}` +
-      (link.maxDownloads ? ` de ${link.maxDownloads}` : '');
+    row.querySelector('b').textContent = showFile ? `${ICONS[link.type] || ''} ${link.type === 'upload' ? `Recibir en ${link.dir}` : link.name}` : link.url;
+    row.querySelector('small').textContent = linkSummary(link);
     row.querySelector('[data-act="copy"]').onclick = () => copy(link.url);
     row.querySelector('[data-act="off"]').onclick = async () => {
-      if (!(await confirm('Desactivar enlace', `Quien tenga el enlace de "${link.name}" ya no podrá descargarlo. ¿Desactivar?`))) return;
+      const what = link.type === 'upload' ? 'subir archivos con este enlace' : `descargar "${link.name}"`;
+      if (!(await confirm('Desactivar enlace', `Quien tenga el enlace ya no podrá ${what}. ¿Desactivar?`))) return;
       await reportError(async () => {
         await api('DELETE', `?token=${encodeURIComponent(link.token)}`);
         onChange();
@@ -76,32 +86,57 @@ async function ensureRemote(path) {
   return remote;
 }
 
-export function shareFile(path) {
+const FILE_LIMITS = [
+  [0, 'Sin límite'],
+  [1, '1 archivo'],
+  [10, '10 archivos'],
+  [50, '50 archivos'],
+];
+const SIZE_LIMITS = [
+  [1024 ** 3, '1 GB en total'],
+  [5 * 1024 ** 3, '5 GB en total'],
+  [20 * 1024 ** 3, '20 GB en total'],
+];
+const KINDS = {
+  file: { title: 'Compartir', intro: 'Crea un enlace para que alguien descargue <b></b> sin entrar en tu MiPuter.', listTitle: 'Enlaces activos de este archivo' },
+  folder: { title: 'Compartir carpeta', intro: 'Crea un enlace para que alguien descargue la carpeta <b></b> entera (como .zip) sin entrar. Si agregas archivos después, también se incluyen.', listTitle: 'Enlaces activos de esta carpeta' },
+  upload: { title: 'Pedir archivos', intro: 'Crea un enlace para que alguien te <b>suba</b> archivos a <b></b> sin entrar ni ver lo que hay. Aparecen en la carpeta a medida que llegan.', listTitle: 'Enlaces activos para esta carpeta' },
+};
+
+const shareDialog = (kind) => (path) => {
   const name = fs.basename(path);
-  const win = createWindow({ title: `Compartir · ${name}`, width: 520, height: 430 });
+  const k = KINDS[kind];
+  const win = createWindow({ title: `${k.title} · ${name}`, width: 540, height: 450 });
+  const limits =
+    kind === 'upload'
+      ? `<label>Archivos <select name="maxFiles">${FILE_LIMITS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
+         <label>Tamaño <select name="maxBytes">${SIZE_LIMITS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>`
+      : `<label>Descargas <select name="max">${LIMITS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>`;
   win.body.innerHTML = `
     <div class="share">
-      <p>Crea un enlace para que alguien descargue <b></b> sin entrar en tu MiPuter.</p>
+      <p>${k.intro}</p>
       <div class="share-form">
-        <label>Caduca en <select name="hours">${DURATIONS.map(([v, l]) => `<option value="${v}"${v === 24 ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
-        <label>Descargas <select name="max">${LIMITS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
+        <label>Caduca en <select name="hours">${DURATIONS.map(([v, l]) => `<option value="${v}"${v === (kind === 'upload' ? 24 * 7 : 24) ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+        ${limits}
         <button class="btn primary" data-act="create">Crear enlace</button>
       </div>
       <div class="share-result" hidden>
         <input readonly>
         <button class="btn" data-act="copy">Copiar</button>
       </div>
-      <h3>Enlaces activos de este archivo</h3>
+      <h3>${k.listTitle}</h3>
       <div class="share-list"></div>
     </div>`;
-  win.body.querySelector('p b').textContent = name;
+  [...win.body.querySelectorAll('p b')].at(-1).textContent = name;
+  const value = (n) => Number(win.body.querySelector(`[name="${n}"]`)?.value) || null;
   const listEl = win.body.querySelector('.share-list');
   const result = win.body.querySelector('.share-result');
   const createBtn = win.body.querySelector('[data-act="create"]');
 
   const refresh = async () => {
-    const remote = fs.getRemote(path);
-    const links = remote ? (await api('GET')).filter((l) => l.key === remote.key) : [];
+    const all = await api('GET');
+    const remote = kind === 'file' && fs.getRemote(path);
+    const links = kind === 'file' ? (remote ? all.filter((l) => l.type === 'file' && l.key === remote.key) : []) : all.filter((l) => l.type === kind && l.dir === fs.normalize(path));
     renderLinks(listEl, links, refresh);
   };
 
@@ -110,13 +145,13 @@ export function shareFile(path) {
       createBtn.disabled = true;
       createBtn.textContent = 'Creando…';
       try {
-        const remote = await ensureRemote(path);
-        const link = await api('POST', '', {
-          key: remote.key,
-          name,
-          hours: Number(win.body.querySelector('[name="hours"]').value),
-          maxDownloads: Number(win.body.querySelector('[name="max"]').value) || null,
-        });
+        const body = { type: kind, hours: value('hours') };
+        if (kind === 'file') Object.assign(body, { key: (await ensureRemote(path)).key, name, maxDownloads: value('max') });
+        else if (kind === 'folder') Object.assign(body, { path: fs.normalize(path), maxDownloads: value('max') });
+        else Object.assign(body, { path: fs.normalize(path), maxFiles: value('maxFiles'), maxBytes: value('maxBytes') });
+        // La carpeta tiene que existir ya en el servidor: se envía lo pendiente antes.
+        if (kind !== 'file') await fs.syncWithServer();
+        const link = await api('POST', '', body);
         result.hidden = false;
         result.querySelector('input').value = link.url;
         result.querySelector('input').select();
@@ -130,7 +165,11 @@ export function shareFile(path) {
   result.querySelector('[data-act="copy"]').onclick = () => copy(result.querySelector('input').value);
   reportError(refresh);
   return win;
-}
+};
+
+export const shareFile = shareDialog('file');
+export const shareFolder = shareDialog('folder');
+export const requestFiles = shareDialog('upload');
 
 export default {
   id: 'shares',
@@ -141,7 +180,7 @@ export default {
     const win = createWindow({ title: 'Enlaces compartidos', width: 560, height: 420 });
     win.body.innerHTML = `
       <div class="share">
-        <p class="muted">Para crear uno: clic derecho en un archivo → <b>Compartir enlace…</b></p>
+        <p class="muted">Para crear uno: clic derecho en un archivo → <b>Compartir enlace…</b>, o en una carpeta → <b>Compartir carpeta…</b> / <b>Pedir archivos…</b></p>
         <div class="share-list"></div>
       </div>`;
     const listEl = win.body.querySelector('.share-list');
