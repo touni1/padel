@@ -303,6 +303,7 @@ export function entryMenu(e, path, container) {
   if (fs.getRemote(path)) items.push({ label: 'Versiones anteriores…', action: () => showVersions(path) });
   if (fs.isDir(path) && !path.startsWith(fs.TRASH) && storage.enabled()) {
     items.push({ label: 'Compartir carpeta…', action: () => shareFolder(path) }, { label: 'Pedir archivos…', action: () => requestFiles(path) });
+    items.push({ label: 'Subir a CelebGO…', action: () => reportError(() => launch('celebgo', { path })) });
   }
   if (!path.startsWith(fs.TRASH + '/') && storage.enabled()) {
     items.push('sep', { label: 'Comprimir en ZIP', action: () => compressEntry(path) });

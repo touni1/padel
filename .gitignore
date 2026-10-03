@@ -7,3 +7,6 @@ node_modules/
 data/
 .windows.json
 .windows.json.tmp
+.web.json
+.celebgo.json
+.celebgo.json.tmp

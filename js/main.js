@@ -14,6 +14,7 @@ import claude from './apps/claude.js';
 import claudeTerminal from './apps/claude-terminal.js';
 import calculator from './apps/calculator.js';
 import browser from './apps/browser.js';
+import celebgo from './apps/celebgo.js';
 import viewer from './apps/viewer.js';
 import settings from './apps/settings.js';
 import trash from './apps/trash.js';
@@ -30,7 +31,7 @@ import calendar, { checkReminders } from './apps/calendar.js';
 
 const DESKTOP_DIR = '/Escritorio';
 
-[files, search, editor, terminal, claude, claudeTerminal, windowsApp, calculator, browser, viewer, imgedit, pdf, pdftools, player, office, calendar, notes, settings, shares, trash].forEach(register);
+[files, search, editor, terminal, claude, claudeTerminal, windowsApp, calculator, browser, celebgo, viewer, imgedit, pdf, pdftools, player, office, calendar, notes, settings, shares, trash].forEach(register);
 
 function appIcon(app) {
   const el = document.createElement('div');

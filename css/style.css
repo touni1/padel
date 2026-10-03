@@ -801,3 +801,25 @@ button.btn.primary { background: var(--accent); border-color: var(--accent); col
 .web-downloads { position: absolute; top: 44px; right: 8px; width: min(440px, calc(100% - 16px)); max-height: calc(100% - 56px); overflow: auto; background: var(--surface); color: var(--text, #1c2230); border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.4); padding: 12px; display: grid; gap: 8px; align-content: start; z-index: 5; }
 .web-downloads-head { display: flex; justify-content: space-between; align-items: center; }
 .web-downloads p { margin: 0; font-size: 13px; }
+
+/* CelebGO */
+.window-body.cg { display: flex; flex-direction: column; position: relative; }
+.cg-bar { flex-wrap: wrap; gap: 6px; }
+.cg-bar .spacer { flex: 1; }
+.cg-bar select, .cg-tags { min-width: 0; max-width: 100%; }
+.cg-tags { flex: 1 1 240px; }
+.cg-stats { padding: 4px 12px; font-size: 12px; min-height: 18px; }
+.cg-list { flex: 1; overflow: auto; padding: 8px 12px; display: grid; gap: 4px; align-content: start; }
+.cg-item { position: relative; overflow: hidden; display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; background: var(--surface-2); font-size: 13px; }
+.cg-item > * { position: relative; }
+.cg-bar-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: rgba(59,130,246,.18); transition: width .2s; }
+.cg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cg-size { font-size: 12px; flex-shrink: 0; }
+.cg-state { font-size: 12px; min-width: 70px; text-align: right; flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cg-uploading, .cg-submitting { color: #3b82f6; }
+.cg-done { color: #16a34a; }
+.cg-error { color: #dc2626; }
+.cg-settings { position: absolute; inset: 0; background: var(--surface); padding: 20px; overflow: auto; display: grid; gap: 12px; align-content: start; z-index: 3; }
+.cg-settings label { display: grid; gap: 4px; font-size: 13px; }
+.cg-settings input { font: inherit; padding: 8px 10px; border: 1px solid var(--border, #d5dae3); border-radius: 8px; background: var(--surface); color: inherit; }
+.cg-row { display: flex; gap: 8px; }

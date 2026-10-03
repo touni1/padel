@@ -2231,6 +2231,126 @@ function freeName(dir, name) {
   return candidate;
 }
 
+// ---------------------------------------------------------------------------
+// CelebGO: subir imágenes y videos a celebgo.net (/api/celebgo)
+// ---------------------------------------------------------------------------
+//
+// Lo mismo que hacía el "CelebGO Uploader" de Windows, pero el que habla con
+// celebgo.net es este servidor (la clave nunca llega al navegador):
+// - imagen: POST {apiUrl}/api/upload (multipart) → key
+// - video: POST /api/upload/video/presign → PUT directo a R2 con el tamaño exacto → key
+// - después /api/submit/image|video con título y tags (quedan PENDING para aprobar).
+// El archivo llega del navegador (desde tu equipo o celular) o se lee de B2 (carpeta de MiPuter).
+
+const CELEBGO_FILE = join(ROOT, '.celebgo.json');
+const CELEBGO_IMG_MAX = 100 * 1024 * 1024;
+const CELEBGO_IMAGE = /\.(jpe?g|png|webp|gif)$/i;
+const CELEBGO_VIDEO = /\.(mp4|mov|webm|mkv|m4v)$/i;
+const CELEBGO_TYPES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska', m4v: 'video/m4v' };
+let celebgo = existsSync(CELEBGO_FILE) ? JSON.parse(readFileSync(CELEBGO_FILE, 'utf8')) : null;
+
+async function celebgoFetch(path, init = {}) {
+  const headers = { 'x-admin-api-key': celebgo.apiKey, ...(init.headers || {}) };
+  const r = await fetch(`${celebgo.apiUrl}${path}`, { ...init, headers, signal: AbortSignal.timeout(10 * 60_000) });
+  if (!r.ok) throw new Error(`celebgo.net respondió ${r.status} en ${path}: ${(await r.text()).slice(0, 200)}`);
+  return r.json();
+}
+
+// PUT a la URL firmada de R2: necesita Content-Length, así que va con https y el tamaño exacto.
+function putPresigned(url, stream, size, type) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    if (u.protocol !== 'https:') return reject(new Error('La URL de subida de celebgo no es https'));
+    const req = https.request(u, { method: 'PUT', headers: { 'content-type': type, 'content-length': size } }, (res) => {
+      let body = '';
+      res.on('data', (d) => (body += d));
+      res.on('end', () => (res.statusCode >= 200 && res.statusCode < 300 ? resolve() : reject(new Error(`R2 respondió ${res.statusCode}: ${body.slice(0, 200)}`))));
+    });
+    req.on('error', reject);
+    stream.on('error', (e) => req.destroy(e));
+    stream.pipe(req);
+  });
+}
+
+async function celebgoSendFile(name, size, stream) {
+  const ext = name.split('.').pop().toLowerCase();
+  const type = CELEBGO_TYPES[ext];
+  if (CELEBGO_IMAGE.test(name)) {
+    if (size > CELEBGO_IMG_MAX) throw new Error('Imagen demasiado grande');
+    const chunks = [];
+    for await (const c of stream) chunks.push(c);
+    const fd = new FormData();
+    fd.append('file', new Blob([Buffer.concat(chunks)], { type }), name);
+    const { key } = await celebgoFetch('/api/upload', { method: 'POST', body: fd });
+    return { r2Key: key, kind: 'image' };
+  }
+  if (CELEBGO_VIDEO.test(name)) {
+    const { presignedUrl, key } = await celebgoFetch('/api/upload/video/presign', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ contentType: type, fileName: name }) });
+    await putPresigned(presignedUrl, stream, size, type);
+    return { r2Key: key, kind: 'video' };
+  }
+  throw new Error('Solo imágenes (jpg, png, webp, gif) y videos (mp4, mov, webm, mkv, m4v)');
+}
+
+async function handleCelebgo(req, res, url) {
+  const route = url.pathname;
+  if (route === '/api/celebgo/config' && req.method === 'GET') return sendJson(res, 200, { configured: Boolean(celebgo), apiUrl: celebgo?.apiUrl || 'https://celebgo.net' });
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Método no permitido' });
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  try {
+    if (route === '/api/celebgo/config') {
+      const input = JSON.parse((await readBody(req, 8192)).toString());
+      let apiUrl;
+      try {
+        apiUrl = new URL(String(input.apiUrl || '').trim());
+      } catch {
+        return sendJson(res, 400, { error: 'La URL no es válida' });
+      }
+      if (apiUrl.protocol !== 'https:' || !isPublicHostname(apiUrl.hostname)) return sendJson(res, 400, { error: 'La URL tiene que ser https y pública (por ejemplo https://celebgo.net)' });
+      const apiKey = String(input.apiKey || '').trim() || celebgo?.apiKey;
+      if (!apiKey) return sendJson(res, 400, { error: 'Falta la API key' });
+      const cfg = { apiUrl: apiUrl.origin, apiKey };
+      writeFileSync(`${CELEBGO_FILE}.tmp`, JSON.stringify(cfg), { mode: 0o600 });
+      renameSync(`${CELEBGO_FILE}.tmp`, CELEBGO_FILE);
+      celebgo = cfg;
+      return sendJson(res, 200, { configured: true, apiUrl: cfg.apiUrl });
+    }
+    if (!celebgo) return sendJson(res, 400, { error: 'Falta configurar CelebGO (⚙)' });
+    if (route === '/api/celebgo/file') {
+      // Desde tu equipo: el cuerpo es el archivo. Desde MiPuter: JSON con la clave de B2.
+      if (String(req.headers['content-type'] || '').startsWith('application/json')) {
+        const input = JSON.parse((await readBody(req, 8192)).toString());
+        const key = checkKey(input.key);
+        const size = Number(input.size);
+        if (!b2.enabled || !Number.isFinite(size) || size <= 0) return sendJson(res, 400, { error: 'Archivo no válido' });
+        return sendJson(res, 200, await celebgoSendFile(String(input.name || ''), size, b2RangeStream(key, 0, size)));
+      }
+      const name = String(url.searchParams.get('name') || '').replace(/[\\/\x00-\x1f]/g, '_').slice(-200);
+      const size = Number(req.headers['content-length']);
+      if (!name || !Number.isFinite(size) || size <= 0) return sendJson(res, 400, { error: 'Archivo no válido' });
+      if (size > MAX_UPLOAD_BYTES) return sendJson(res, 413, { error: `Supera ${human(MAX_UPLOAD_BYTES)}` });
+      return sendJson(res, 200, await celebgoSendFile(name, size, req));
+    }
+    if (route === '/api/celebgo/submit') {
+      const input = JSON.parse((await readBody(req, 512 * 1024)).toString());
+      const kind = input.kind === 'video' ? 'video' : 'image';
+      const items = (Array.isArray(input.items) ? input.items : []).slice(0, 100).map((i) => ({ title: String(i.title || '').slice(0, 200), r2Key: String(i.r2Key || '') }));
+      const tags = (Array.isArray(input.tags) ? input.tags : []).map((t) => String(t).trim().toLowerCase()).filter(Boolean).join(',');
+      if (!items.length || !tags) return sendJson(res, 400, { error: 'Faltan archivos o tags' });
+      return sendJson(res, 200, await celebgoFetch(`/api/submit/${kind}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items, tags }) }));
+    }
+  } catch (e) {
+    return sendJson(res, 502, { error: e.message });
+  }
+  return sendJson(res, 404, { error: 'No encontrado' });
+}
+
+// Solo nombres que resuelven a IPs públicas (el servidor no habla con la red interna).
+function isPublicHostname(hostname) {
+  if (net.isIP(hostname)) return isPublicIp(hostname);
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(hostname) && !/(^|\.)localhost$/i.test(hostname);
+}
+
 async function handleWindowsConfig(req, res) {
   if (req.method === 'GET') {
     return sendJson(res, 200, rdpConfig ? { configured: true, host: rdpConfig.host, port: rdpConfig.port, username: rdpConfig.username, domain: rdpConfig.domain, layout: rdpConfig.layout } : { configured: false, layouts: RDP_LAYOUTS });
@@ -2313,6 +2433,7 @@ async function handleApi(req, res, url) {
   if (route === '/api/fetch-url' && method === 'POST') return handleFetchUrl(req, res);
   if (route === '/api/windows-config') return handleWindowsConfig(req, res);
   if (route === '/api/web' || route.startsWith('/api/web/')) return handleWebApi(req, res, url);
+  if (route.startsWith('/api/celebgo/')) return handleCelebgo(req, res, url);
   if (route === '/api/zip' || route === '/api/unzip' || route === '/api/jobs') return handleZipApi(req, res, url);
   if (route === '/api/pdf' && method === 'POST') return handlePdfOps(req, res);
   if (route.startsWith('/api/uploads')) {

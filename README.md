@@ -188,6 +188,12 @@ La app **Navegador** es un Google Chrome de verdad que corre en el VPS (usuario 
 - **Aislamiento**: Chrome no llega a loopback, redes privadas ni a las IPs del VPS, y no ve otras carpetas. MiPuter abre los archivos de mpweb sin seguir enlaces simbólicos.
 - **Instalación** (una vez): `sudo bash deploy/setup-web.sh` (Chrome del repositorio oficial de Google, TigerVNC, usuario `mpweb`, servicios `miputer-web-x` y `miputer-web`). La contraseña VNC se genera sola y queda en `.web.json`.
 
+## CelebGO
+
+La app **CelebGO** reemplaza al "CelebGO Uploader" de Windows: sube carpetas de imágenes (jpg, png, webp, gif) y videos (mp4, mov, webm, mkv, m4v) a celebgo.net con tags, y quedan en **PENDING** para aprobarlas. Se pueden subir desde una carpeta de MiPuter (clic derecho → *Subir a CelebGO…*, se lee de B2), desde una carpeta del equipo o desde archivos sueltos (en el celular, de la galería). Hace 3 subidas a la vez (configurable), reintenta hasta 3 veces y envía las imágenes de a 50.
+
+El que habla con celebgo es el servidor (`/api/celebgo/*`): las imágenes van a `/api/upload` y los videos a una URL firmada de R2 (`/api/upload/video/presign`). Después se envían con `/api/submit/image|video`. La URL y la API key (`ADMIN_UPLOAD_API_KEY` de celebgo) se cargan desde el ⚙ de la app y quedan en `.celebgo.json` (600). La key nunca vuelve al navegador.
+
 ## Despliegue
 
 Así está desplegado en un VPS Ubuntu 24.04 que ya tenía nginx y otras apps.
