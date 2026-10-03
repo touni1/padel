@@ -538,3 +538,12 @@ button.btn.primary { background: var(--accent); border-color: var(--accent); col
 .player-list li:hover { background: #222; }
 .player-list li.playing { background: var(--accent); color: #fff; }
 @media (max-width: 700px) { .player-list { display: none; } }
+
+/* Documentos (Word / Excel) */
+.office-info { font-size: 13px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.office-bar .spacer { flex: 1; }
+.office-dl { text-decoration: none; }
+.office-frame { width: 100%; border: 0; background: #fff; }
+.office-tabs { display: flex; gap: 2px; padding: 4px 6px 0; background: var(--surface-2); border-bottom: 1px solid var(--border); overflow-x: auto; }
+.office-tabs button { padding: 4px 12px; border: 1px solid var(--border); border-bottom: 0; border-radius: 6px 6px 0 0; background: var(--surface); color: var(--text); cursor: pointer; white-space: nowrap; }
+.office-tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
