@@ -2210,7 +2210,7 @@ async function handleWebApi(req, res, url) {
       return sendJson(res, 202, { job: id });
     }
   } catch (e) {
-    return sendJson(res, e.status || (e.code === 'ENOENT' ? 404 : e.code === 'ELOOP' ? 400 : 500), { error: e.code === 'ENOENT' ? 'Ese archivo ya no está' : e.message });
+    return sendJson(res, e.status || (e.code === 'ENOENT' ? 404 : e.code === 'ELOOP' ? 400 : 500), { error: e.code === 'ENOENT' ? 'Ese archivo ya no está' : e.code === 'ELOOP' ? 'Eso no es un archivo normal' : e.message });
   }
   return sendJson(res, 404, { error: 'No encontrado' });
 }
