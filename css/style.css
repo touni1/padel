@@ -659,3 +659,12 @@ button.btn.primary { background: var(--accent); border-color: var(--accent); col
 .pick-row small { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pick-bar .spacer { flex: 1; }
 .pick-count { font-size: 13px; color: var(--text-muted); }
+
+/* Windows (escritorio remoto) */
+.window-body.rdp { display: flex; flex-direction: column; overflow: hidden; background: #000; outline: none; }
+.rdp-bar { flex-wrap: wrap; }
+.rdp-bar .spacer { flex: 1; }
+.rdp-status { font-size: 13px; color: var(--text-muted); }
+.rdp-screen { flex: 1; min-height: 0; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; background: #000; }
+.rdp-display { cursor: none; }
+.rdp-empty { color: #ddd; text-align: center; display: grid; gap: 12px; justify-items: center; padding: 20px; }

@@ -15,6 +15,8 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { mkdtemp, writeFile, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import net from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 if (existsSync(join(ROOT, '.env'))) process.loadEnvFile(join(ROOT, '.env'));
@@ -433,10 +435,14 @@ const ptyClients = new Set();
 
 let pty = null;
 let WebSocketServer = null;
+try {
+  ({ WebSocketServer } = await import('ws'));
+} catch (e) {
+  console.error(`Sin WebSockets (¿falta npm install?): ${e.message}`);
+}
 if (CLAUDE_SOCKET) {
   try {
     pty = (await import('node-pty')).default;
-    ({ WebSocketServer } = await import('ws'));
   } catch (e) {
     console.error(`App Claude desactivada (¿falta npm install?): ${e.message}`);
   }
@@ -513,10 +519,12 @@ function attachClaude(ws, slot, cols, rows) {
 function handleUpgrade(req, socket, head) {
   const reject = (status) => socket.end(`HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\nConnection: close\r\n\r\n`);
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname !== '/api/pty' || !claudeEnabled()) return reject(404);
-  if (!isAuthenticated(req)) return reject(401);
+  if (url.pathname !== '/api/pty' && url.pathname !== '/api/rdp') return reject(404);
+  if (!auth.enabled || !isAuthenticated(req)) return reject(401);
   if (auth.mustChange) return reject(403);
   if (!sameOrigin(req)) return reject(403);
+  if (url.pathname === '/api/rdp') return handleRdpUpgrade(req, socket, head, url, reject);
+  if (!claudeEnabled()) return reject(404);
   const slot = Number(url.searchParams.get('slot'));
   if (!Number.isInteger(slot) || slot < 1 || slot > CLAUDE_MAX) return reject(400);
   if (ptyClients.size >= CLAUDE_MAX) return reject(429);
@@ -530,6 +538,8 @@ function handleUpgrade(req, socket, head) {
 }
 
 const wss = claudeEnabled() ? new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 }) : null;
+// El cliente de Guacamole pide el subprotocolo "guacamole".
+const rdpWss = WebSocketServer ? new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, handleProtocols: (protocols) => (protocols.has('guacamole') ? 'guacamole' : false) }) : null;
 
 // Cierra las sesiones que llevan CLAUDE_IDLE_HOURS sin nadie conectado.
 if (wss && CLAUDE_IDLE_MS > 0) {
@@ -1296,6 +1306,188 @@ async function handleB2Config(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// App Windows: escritorio remoto (RDP) por WebSocket (/api/rdp) a través de guacd
+// ---------------------------------------------------------------------------
+//
+// El navegador habla el protocolo de Guacamole con este servidor, que hace el
+// saludo con guacd (127.0.0.1:4822) poniendo los datos de conexión, y después
+// solo pasa instrucciones completas de un lado a otro. La contraseña de Windows
+// vive en .windows.json (600) y nunca llega al navegador.
+
+const RDP_FILE = join(ROOT, '.windows.json');
+const RDP_MAX = 2;
+const RDP_LAYOUTS = ['es-latam-qwerty', 'es-es-qwerty', 'en-us-qwerty', 'pt-br-qwerty'];
+let rdpConfig = existsSync(RDP_FILE) ? JSON.parse(readFileSync(RDP_FILE, 'utf8')) : null;
+const rdpClients = new Set();
+
+// Guacamole cuenta longitudes en caracteres Unicode, no en unidades de JavaScript.
+const guacEncode = (...elements) => elements.map((e) => `${[...String(e)].length}.${e}`).join(',') + ';';
+
+// Separa del búfer las instrucciones completas. Devuelve { instructions, raw, rest }.
+function guacParse(buffer) {
+  const instructions = [];
+  let i = 0;
+  let consumed = 0;
+  outer: while (i < buffer.length) {
+    const elements = [];
+    for (;;) {
+      const dot = buffer.indexOf('.', i);
+      if (dot < 0) break outer;
+      const length = Number(buffer.slice(i, dot));
+      if (!Number.isInteger(length) || length < 0) throw new Error('Instrucción de Guacamole mal formada');
+      let j = dot + 1;
+      for (let n = 0; n < length; n++) {
+        if (j >= buffer.length) break outer;
+        j += buffer.codePointAt(j) > 0xffff ? 2 : 1;
+      }
+      if (j >= buffer.length) break outer;
+      elements.push(buffer.slice(dot + 1, j));
+      const term = buffer[j];
+      i = j + 1;
+      if (term === ';') break;
+      if (term !== ',') throw new Error('Instrucción de Guacamole mal formada');
+    }
+    instructions.push(elements);
+    consumed = i;
+  }
+  return { instructions, raw: buffer.slice(0, consumed), rest: buffer.slice(consumed) };
+}
+
+function rdpParams(q) {
+  const c = rdpConfig;
+  return {
+    hostname: c.host,
+    port: String(c.port || 3389),
+    username: c.username,
+    password: c.password,
+    domain: c.domain || '',
+    security: 'any',
+    'ignore-cert': 'true',
+    'server-layout': c.layout || 'es-latam-qwerty',
+    'resize-method': 'display-update',
+    'enable-wallpaper': 'true',
+    'enable-font-smoothing': 'true',
+    timezone: q.tz || '',
+  };
+}
+
+function attachRdp(ws, q) {
+  const guacd = net.connect(4822, '127.0.0.1');
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+  let ready = false;
+  const close = () => {
+    rdpClients.delete(ws);
+    guacd.destroy();
+    if (ws.readyState === ws.OPEN) ws.close();
+  };
+  // El cliente de Guacamole espera primero el identificador del túnel.
+  ws.send(guacEncode('', crypto.randomUUID()));
+
+  guacd.on('connect', () => guacd.write(guacEncode('select', 'rdp')));
+  guacd.on('data', (chunk) => {
+    let parsed;
+    try {
+      parsed = guacParse(buffer + decoder.write(chunk));
+    } catch (e) {
+      console.error(`RDP: ${e.message}`);
+      return close();
+    }
+    buffer = parsed.rest;
+    if (ready) {
+      if (parsed.raw && ws.readyState === ws.OPEN) ws.send(parsed.raw);
+      return;
+    }
+    for (const [opcode, ...args] of parsed.instructions) {
+      if (opcode === 'args') {
+        // Saludo: tamaño de pantalla, formatos que entiende el navegador y datos de conexión.
+        const params = rdpParams(q);
+        guacd.write(guacEncode('size', q.width, q.height, q.dpi));
+        guacd.write(guacEncode('audio', 'audio/L8', 'audio/L16'));
+        guacd.write(guacEncode('video'));
+        guacd.write(guacEncode('image', 'image/png', 'image/jpeg', 'image/webp'));
+        if (q.tz) guacd.write(guacEncode('timezone', q.tz));
+        guacd.write(guacEncode('connect', ...args.map((name) => (name.startsWith('VERSION_') ? 'VERSION_1_3_0' : params[name] ?? ''))));
+      } else if (opcode === 'ready') {
+        ready = true;
+        // Lo que llegó detrás de "ready" en el mismo paquete ya es de la sesión.
+        const after = parsed.instructions.slice(parsed.instructions.findIndex((x) => x[0] === 'ready') + 1);
+        if (after.length && ws.readyState === ws.OPEN) ws.send(after.map((x) => guacEncode(...x)).join(''));
+        break;
+      } else if (opcode === 'error') {
+        if (ws.readyState === ws.OPEN) ws.send(guacEncode(opcode, ...args));
+        return close();
+      }
+    }
+  });
+  guacd.on('error', (e) => {
+    console.error(`RDP: no se pudo hablar con guacd (${e.message})`);
+    if (ws.readyState === ws.OPEN) ws.send(guacEncode('error', 'No se pudo conectar con el servicio de escritorio remoto', '519'));
+    close();
+  });
+  guacd.on('close', close);
+
+  ws.on('message', (data) => {
+    const text = data.toString();
+    // Instrucciones internas del túnel ("0.," = opcode vacío): el ping se devuelve, no va a guacd.
+    if (text.startsWith('0.,')) {
+      if (text.startsWith('0.,4.ping,')) ws.send(text);
+      return;
+    }
+    if (ready) guacd.write(text);
+  });
+  ws.on('close', close);
+}
+
+function handleRdpUpgrade(req, socket, head, url, reject) {
+  if (!rdpConfig || !WebSocketServer) return reject(404);
+  if (rdpClients.size >= RDP_MAX) return reject(429);
+  const n = (k, def, min, max) => Math.min(max, Math.max(min, Math.round(Number(url.searchParams.get(k)) || def)));
+  const q = {
+    width: n('width', 1280, 320, 4096),
+    height: n('height', 720, 240, 2160),
+    dpi: n('dpi', 96, 48, 300),
+    tz: /^[A-Za-z_]+\/[A-Za-z_\/+-]+$/.test(url.searchParams.get('tz') || '') ? url.searchParams.get('tz') : '',
+  };
+  const placeholder = {};
+  rdpClients.add(placeholder);
+  rdpWss.handleUpgrade(req, socket, head, (ws) => {
+    rdpClients.delete(placeholder);
+    rdpClients.add(ws);
+    attachRdp(ws, q);
+  });
+}
+
+async function handleWindowsConfig(req, res) {
+  if (req.method === 'GET') {
+    return sendJson(res, 200, rdpConfig ? { configured: true, host: rdpConfig.host, port: rdpConfig.port, username: rdpConfig.username, domain: rdpConfig.domain, layout: rdpConfig.layout } : { configured: false, layouts: RDP_LAYOUTS });
+  }
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'Método no permitido' });
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  let input;
+  try {
+    input = JSON.parse((await readBody(req, 8192)).toString());
+  } catch {
+    return sendJson(res, 400, { error: 'Datos no válidos' });
+  }
+  const host = String(input.host || '').trim();
+  const username = String(input.username || '').trim();
+  const port = Number(input.port || 3389);
+  if (!/^[a-z0-9.-]{1,253}$/i.test(host)) return sendJson(res, 400, { error: 'Dirección del Windows no válida' });
+  if (!username) return sendJson(res, 400, { error: 'Falta el usuario de Windows' });
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return sendJson(res, 400, { error: 'Puerto no válido' });
+  // Sin contraseña nueva se conserva la anterior (para cambiar solo el teclado, por ejemplo).
+  const password = String(input.password || '') || rdpConfig?.password;
+  if (!password) return sendJson(res, 400, { error: 'Falta la contraseña de Windows' });
+  rdpConfig = { host, port, username, password, domain: String(input.domain || '').trim(), layout: RDP_LAYOUTS.includes(input.layout) ? input.layout : RDP_LAYOUTS[0] };
+  const tmp = `${RDP_FILE}.tmp`;
+  writeFileSync(tmp, JSON.stringify(rdpConfig), { mode: 0o600 });
+  renameSync(tmp, RDP_FILE);
+  console.log(`Escritorio remoto configurado: ${username}@${host}:${port}`);
+  return sendJson(res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
 
@@ -1344,6 +1536,7 @@ async function handleApi(req, res, url) {
   if (route === '/api/tree') return handleTree(req, res);
   if (route === '/api/shares') return handleSharesApi(req, res, url);
   if (route === '/api/thumbs') return handleThumbs(req, res, url);
+  if (route === '/api/windows-config') return handleWindowsConfig(req, res);
   if (route === '/api/zip' || route === '/api/unzip' || route === '/api/jobs') return handleZipApi(req, res, url);
   if (route === '/api/pdf' && method === 'POST') return handlePdfOps(req, res);
   if (route.startsWith('/api/uploads')) {

@@ -5,3 +5,5 @@ node_modules/
 .b2.json
 .b2.json.tmp
 data/
+.windows.json
+.windows.json.tmp

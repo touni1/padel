@@ -60,6 +60,22 @@ export default {
           <h3>Espacio usado</h3>
           <div class="usage"></div>
         </section>
+        <section class="win-config" hidden>
+          <h3>Windows (escritorio remoto)</h3>
+          <p class="win-state muted"></p>
+          <form class="b2-form win-form">
+            <input name="host" placeholder="Dirección (IP o nombre)" autocomplete="off" spellcheck="false" required>
+            <input name="username" placeholder="Usuario de Windows" autocomplete="off" spellcheck="false" required>
+            <input name="password" type="password" placeholder="Contraseña" autocomplete="new-password">
+            <select name="layout" title="Teclado de Windows">
+              <option value="es-latam-qwerty">Teclado: Español (Latinoamérica)</option>
+              <option value="es-es-qwerty">Teclado: Español (España)</option>
+              <option value="en-us-qwerty">Teclado: Inglés (EE. UU.)</option>
+              <option value="pt-br-qwerty">Teclado: Portugués (Brasil)</option>
+            </select>
+            <button class="btn" type="submit">Guardar</button>
+          </form>
+        </section>
         <section class="b2-config" hidden>
           <h3>Backblaze B2 (dónde se guardan las subidas)</h3>
           <p class="b2-state muted"></p>
@@ -100,9 +116,43 @@ export default {
     };
     renderUsage(win.body.querySelector('.usage'));
     setupB2(win.body.querySelector('.b2-config'));
+    setupWindows(win.body.querySelector('.win-config'));
     return win;
   },
 };
+
+// La contraseña se manda una vez y se guarda en el servidor; nunca vuelve al navegador.
+async function setupWindows(section) {
+  const state = section.querySelector('.win-state');
+  const form = section.querySelector('.win-form');
+  const show = (cfg) => {
+    state.textContent = cfg.configured
+      ? `Configurado: ${cfg.username}@${cfg.host}. Deja la contraseña vacía para conservar la actual.`
+      : 'Sin configurar. Para la app Windows: los datos con los que entras por escritorio remoto.';
+    if (cfg.configured) ['host', 'username', 'layout'].forEach((k) => cfg[k] && (form[k].value = cfg[k]));
+  };
+  try {
+    const res = await fetch('api/windows-config');
+    if (!res.ok) return;
+    show(await res.json());
+    section.hidden = false;
+  } catch {
+    return;
+  }
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const res = await fetch('api/windows-config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(form))) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+      form.password.value = '';
+      toast('Datos de Windows guardados').done();
+      show(await (await fetch('api/windows-config')).json());
+    } catch (err) {
+      toast(err.message).done(err.message, true);
+    }
+  };
+}
 
 function renderUsage(el) {
   const u = fs.usage();
