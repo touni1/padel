@@ -19,10 +19,12 @@ import pdf from './apps/pdf.js';
 import search from './apps/search.js';
 import player from './apps/player.js';
 import office from './apps/office.js';
+import notes, { renderNotes, newNote } from './apps/notes.js';
+import calendar, { checkReminders } from './apps/calendar.js';
 
 const DESKTOP_DIR = '/Escritorio';
 
-[files, search, editor, terminal, claude, calculator, browser, viewer, pdf, player, office, settings, shares, trash].forEach(register);
+[files, search, editor, terminal, claude, calculator, browser, viewer, pdf, player, office, calendar, notes, settings, shares, trash].forEach(register);
 
 function appIcon(app) {
   const el = document.createElement('div');
@@ -91,11 +93,14 @@ function startClock() {
   setInterval(tick, 10_000);
 }
 
+// Clic en el reloj: calendario.
+document.getElementById('clock').onclick = () => launch('calendar');
+
 function wireDesktop() {
   const desktop = document.getElementById('desktop');
   desktop.addEventListener('contextmenu', (e) => {
     if (e.target.closest('.window')) return;
-    folderMenu(e, DESKTOP_DIR, ['sep', { label: 'Ajustes del escritorio', action: () => launch('settings') }]);
+    folderMenu(e, DESKTOP_DIR, ['sep', { label: 'Nueva nota', action: newNote }, { label: 'Ajustes del escritorio', action: () => launch('settings') }]);
   });
   desktop.addEventListener('dragover', (e) => e.preventDefault());
   desktop.addEventListener('drop', (e) => {
@@ -131,7 +136,12 @@ storage.init().then(async () => {
   renderStartMenu();
   await fs.syncWithServer();
   fs.purgeTrash();
+  renderNotes();
+  checkReminders();
 });
+fs.onChange(renderNotes);
+renderNotes();
+setInterval(checkReminders, 30_000);
 
 // El árbol de carpetas vive en el servidor: se trae al volver a la pestaña y cada 20 s,
 // y lo pendiente se envía al ocultarla o cerrarla.

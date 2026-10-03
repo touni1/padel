@@ -616,6 +616,21 @@ export function uniqueName(dir, name) {
 
 export function reset() {
   deleteRemote(root);
+  const apps = root.apps;
   root = defaultTree();
+  if (apps) root.apps = apps; // las notas y el calendario no son "archivos": se conservan
+  persist();
+}
+
+// Datos de las apps (notas, calendario…). Viven en el mismo árbol, así que se
+// guardan en el servidor y se sincronizan entre navegadores igual que las carpetas.
+export function getData(name, fallback) {
+  const value = root.apps?.[name];
+  return value === undefined ? structuredClone(fallback) : structuredClone(value);
+}
+
+export function setData(name, value) {
+  root.apps ??= {};
+  root.apps[name] = value;
   persist();
 }

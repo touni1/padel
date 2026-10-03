@@ -35,6 +35,8 @@ Mi propio "puter.com": un escritorio completo que se ejecuta en el navegador, he
 | 📕 Editor de PDF | Texto, resaltar, tapar, dibujar y firmar; rellenar formularios; rotar, mover y borrar páginas; unir PDFs. Guarda sobre el archivo o como copia (pdf.js + pdf-lib, en `js/vendor/`) |
 | 🔍 Buscar | Busca archivos y carpetas por nombre en todo MiPuter, sin distinguir mayúsculas ni acentos |
 | 🗑️ Papelera | Lo eliminado va aquí: restaurar a su sitio, eliminar para siempre o vaciar. Se borra solo a los 30 días |
+| 📅 Calendario | Mes con eventos (hora y aviso opcionales). Clic en el reloj para abrirlo. Los avisos salen mientras MiPuter esté abierto, también como notificación del sistema |
+| 🗒️ Notas | Post-its sobre el escritorio (Inicio → Nota nueva o clic derecho → Nueva nota): se mueven, cambian de tamaño y color, y se guardan solas |
 | ⚙️ Ajustes | Fondos de escritorio, tema claro/oscuro y restablecer archivos |
 
 ## Cómo ejecutarlo
@@ -91,7 +93,7 @@ Si `.env` no está configurado (o sirves la carpeta con un servidor estático, c
 
 ## Sincronización de carpetas
 
-El árbol de carpetas (nombres, carpetas, textos pequeños y la papelera) vive en el servidor, en `data/arbol.json`, y además se copia a B2 (`miputer/.arbol.json`) unos segundos después de cada cambio. Si se pierde el disco del servidor, se recupera solo desde B2 al arrancar.
+El árbol de carpetas (nombres, carpetas, textos pequeños, la papelera, las notas y el calendario) vive en el servidor, en `data/arbol.json`, y además se copia a B2 (`miputer/.arbol.json`) unos segundos después de cada cambio. Si se pierde el disco del servidor, se recupera solo desde B2 al arrancar.
 
 - El navegador guarda una copia en `localStorage` para cargar al instante y envía cada cambio en menos de un segundo, con la versión sobre la que se hizo.
 - Si otro navegador guardó antes, el servidor responde 409 y se carga su versión. Cada navegador busca cambios al volver a la pestaña y cada 20 s.
