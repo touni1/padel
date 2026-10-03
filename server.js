@@ -8,7 +8,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, createReadStream, statSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
+import { existsSync, createReadStream, statSync, readFileSync, writeFileSync, renameSync, mkdirSync, unlinkSync, copyFileSync } from 'node:fs';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable, Transform } from 'node:stream';
@@ -1101,6 +1101,51 @@ const BLOCKED_BOTS =
   /googlebot|google-extended|googleother|google-inspectiontool|adsbot|mediapartners|apis-google|storebot|bingbot|bingpreview|msnbot|adidxbot|slurp|duckduckbot|baiduspider|yandex|sogou|exabot|seznambot|petalbot|applebot|amazonbot|gptbot|chatgpt-user|oai-searchbot|ccbot|claudebot|claude-web|claude-searchbot|anthropic-ai|perplexitybot|perplexity-user|youbot|cohere-ai|bytespider|meta-externalagent|meta-externalfetcher|facebookbot|diffbot|imagesiftbot|omgili|timpibot|ahrefsbot|semrushbot|mj12bot|dotbot|dataforseobot|blexbot|serpstatbot|barkrowler|seekportbot|ia_archiver|archive\.org_bot|heritrix|scrapy|crawler|spider/i;
 
 // ---------------------------------------------------------------------------
+// Miniaturas (/api/thumbs)
+// ---------------------------------------------------------------------------
+//
+// Las genera el navegador (al subir una foto o vídeo, o la primera vez que se ve)
+// y se guardan en el disco del servidor, no en B2: verlas no gasta descargas.
+// Si se pierden, se vuelven a generar solas.
+
+const THUMB_DIR = join(DATA_DIR, 'miniaturas');
+const MAX_THUMB_BYTES = 300 * 1024;
+const thumbFile = (key) => join(THUMB_DIR, `${sha256(key)}.img`);
+const thumbType = (b) =>
+  b[0] === 0xff && b[1] === 0xd8 ? 'image/jpeg' : b[0] === 0x89 && b[1] === 0x50 ? 'image/png' : b.subarray(8, 12).toString() === 'WEBP' ? 'image/webp' : null;
+
+function removeThumb(key) {
+  try {
+    unlinkSync(thumbFile(key));
+  } catch {}
+}
+
+function copyThumb(from, to) {
+  try {
+    copyFileSync(thumbFile(from), thumbFile(to));
+  } catch {}
+}
+
+async function handleThumbs(req, res, url) {
+  const key = checkKey(url.searchParams.get('key'));
+  const file = thumbFile(key);
+  if (req.method === 'GET') {
+    if (!existsSync(file)) return sendJson(res, 404, { error: 'Sin miniatura' });
+    const body = readFileSync(file);
+    // La clave de un archivo no cambia de contenido salvo al editarlo, y las fotos no se editan aquí.
+    res.writeHead(200, { 'content-type': thumbType(body) || 'application/octet-stream', 'cache-control': 'private, max-age=31536000, immutable' });
+    return res.end(body);
+  }
+  if (req.method !== 'PUT') return sendJson(res, 405, { error: 'Método no permitido' });
+  if (!sameOrigin(req)) return sendJson(res, 403, { error: 'Origen no permitido' });
+  const body = await readBody(req, MAX_THUMB_BYTES);
+  if (!thumbType(body)) return sendJson(res, 400, { error: 'La miniatura tiene que ser WebP, JPEG o PNG' });
+  mkdirSync(THUMB_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(file, body, { mode: 0o600 });
+  return sendJson(res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------------------
 // Configurar B2 desde Ajustes
 // ---------------------------------------------------------------------------
 //
@@ -1199,6 +1244,7 @@ async function handleApi(req, res, url) {
   if (route === '/api/b2-config') return handleB2Config(req, res);
   if (route === '/api/tree') return handleTree(req, res);
   if (route === '/api/shares') return handleSharesApi(req, res, url);
+  if (route === '/api/thumbs') return handleThumbs(req, res, url);
   if (route === '/api/zip' || route === '/api/unzip' || route === '/api/jobs') return handleZipApi(req, res, url);
   if (route.startsWith('/api/uploads')) {
     if (!b2.enabled) return sendJson(res, 503, { error: 'Backblaze B2 no está configurado en el servidor' });
@@ -1220,6 +1266,7 @@ async function handleApi(req, res, url) {
     const src = checkKey(url.searchParams.get('key'));
     const key = newKey(src.slice(PREFIX.length + 37));
     await b2Request('PUT', key, { headers: { 'x-amz-copy-source': `/${b2.bucket}/${src.split('/').map(encodeRfc3986).join('/')}` } });
+    copyThumb(src, key);
     return sendJson(res, 201, { key });
   }
 
@@ -1238,11 +1285,13 @@ async function handleApi(req, res, url) {
     if (method === 'PUT') {
       const body = await readBody(req, SINGLE_UPLOAD_BYTES);
       await b2Request('PUT', key, { body, headers: { 'content-type': req.headers['content-type'] || 'application/octet-stream' } });
+      removeThumb(key);
       return sendJson(res, 200, { key, size: body.length });
     }
 
     if (method === 'DELETE') {
       await b2Request('DELETE', key);
+      removeThumb(key);
       return sendJson(res, 200, { ok: true });
     }
   }

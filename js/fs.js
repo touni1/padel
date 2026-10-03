@@ -333,7 +333,9 @@ export function writeRemote(path, remote) {
   const existing = parent.children[name];
   if (existing && existing.type === 'dir') throw new Error(`Es un directorio: ${path}`);
   if (existing?.remote && existing.remote.key !== remote.key) deleteRemote(existing);
-  parent.children[name] = { type: 'file', content: '', remote: { key: remote.key, size: remote.size, type: remote.type }, mtime: now() };
+  const r = { key: remote.key, size: remote.size, type: remote.type };
+  if (remote.thumb !== undefined) r.thumb = remote.thumb;
+  parent.children[name] = { type: 'file', content: '', remote: r, mtime: now() };
   parent.mtime = now();
   persist();
 }
@@ -531,6 +533,20 @@ function mkdirp(path) {
     cur = cur.children[part];
   }
   return cur;
+}
+
+// Marca si el archivo de B2 `key` tiene miniatura (true) o no se puede hacer (false).
+export function setThumb(key, ok) {
+  let changed = false;
+  const walk = (n) => {
+    if (n.type === 'dir') Object.values(n.children).forEach(walk);
+    else if (n.remote?.key === key && n.remote.thumb !== ok) {
+      n.remote.thumb = ok;
+      changed = true;
+    }
+  };
+  walk(root);
+  if (changed) persist();
 }
 
 // Crea `path` y las carpetas intermedias que falten (como mkdir -p).

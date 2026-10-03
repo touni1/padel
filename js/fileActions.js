@@ -4,6 +4,7 @@ import { openPath, glyphFor } from './registry.js';
 import * as storage from './storage.js';
 import { prompt, confirm, alert, contextMenu, reportError, escapeHtml, toast } from './ui.js';
 import { shareFile } from './apps/shares.js';
+import { canThumb, makeThumb, uploadThumb, ensureThumb, thumbUrl } from './thumbs.js';
 
 export async function newFolder(dir) {
   const name = await prompt('Nueva carpeta', 'Nombre de la carpeta:', fs.uniqueName(dir, 'Nueva carpeta'));
@@ -138,8 +139,14 @@ export async function importFiles(dir, items, emptyDirs = []) {
       );
     };
     try {
-      if (storage.enabled()) fs.writeRemote(target(), await storage.upload(file, file.name, pct));
-      else fs.writeFile(target(), await readLocal(file));
+      if (storage.enabled()) {
+        const remote = await storage.upload(file, file.name, pct);
+        if (canThumb(file.name)) {
+          const thumb = await makeThumb(file, file.name);
+          remote.thumb = Boolean(thumb) && (await uploadThumb(remote.key, thumb));
+        }
+        fs.writeRemote(target(), remote);
+      } else fs.writeFile(target(), await readLocal(file));
     } catch (e) {
       errors.push(`${path}: ${e.message}`);
     }
@@ -257,6 +264,16 @@ export function renderIcons(container, dir, { onOpen = openPath } = {}) {
     el.draggable = true;
     el.dataset.path = entry.path;
     el.innerHTML = `<span class="glyph">${glyphFor(entry)}</span><span>${escapeHtml(entry.name)}</span>`;
+    // Fotos y vídeos: su miniatura en vez del icono.
+    if (entry.remote?.thumb) {
+      const img = Object.assign(document.createElement('img'), { className: 'thumb', src: thumbUrl(entry.remote.key), loading: 'lazy', alt: '' });
+      img.onerror = () => img.replaceWith(Object.assign(document.createElement('span'), { className: 'glyph', textContent: glyphFor(entry) }));
+      el.querySelector('.glyph').replaceWith(img);
+    } else if (entry.remote && canThumb(entry.name)) {
+      ensureThumb(entry.path, entry.remote);
+    } else if (!entry.remote && entry.type === 'file' && /^data:image\//.test(fs.readFile(entry.path).slice(0, 11))) {
+      el.querySelector('.glyph').replaceWith(Object.assign(document.createElement('img'), { className: 'thumb', src: fs.readFile(entry.path), alt: '' }));
+    }
     if (entry.remote) {
       el.classList.add('remote');
       el.title = 'Guardado en Backblaze B2';
