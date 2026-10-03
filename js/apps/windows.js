@@ -73,13 +73,17 @@ export default {
       el.classList.add('rdp-display');
       screen.appendChild(el);
 
+      let lastError = '';
       client.onstatechange = (state) => {
-        status.textContent = `${STATES[state] || ''} · ${cfg.username}@${cfg.host}`;
+        // Al desconectarse se mantiene el motivo, si lo hubo (p. ej. contraseña incorrecta).
+        status.textContent = state === 5 && lastError ? lastError : `${STATES[state] || ''} · ${cfg.username}@${cfg.host}`;
         if (state === 3) setTimeout(fit, 100);
         if (state === 5) reconnectBtn.hidden = false;
       };
       client.onerror = (err) => {
-        status.textContent = `Error: ${err.message || 'no se pudo conectar'}${err.code === 0x0207 || err.code === 0x0301 ? ' (¿usuario o contraseña de Windows?)' : ''}`;
+        const auth = err.code === 0x0207 || err.code === 0x0301 || /credential|authentication/i.test(err.message || '');
+        lastError = auth ? 'Windows rechazó el usuario o la contraseña: revísalos en Ajustes → Windows' : `Error: ${err.message || 'no se pudo conectar'}`;
+        status.textContent = lastError;
         reconnectBtn.hidden = false;
       };
       display.onresize = fit;
